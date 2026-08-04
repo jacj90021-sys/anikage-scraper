@@ -144,7 +144,7 @@ def sources():
         return jsonify({"error": "ep must be an integer"}), 400
 
     try:
-        res = resolve_stream(slug, ep_n, type=audio_type)
+        res = resolve_stream(slug, ep_n, provider=request.args.get("provider"), type=audio_type)
     except Exception as e:
         return jsonify({"error": f"resolve failed: {e}", "source": "anikage"}), 502
 
@@ -177,6 +177,8 @@ def servers_route():
     slug = request.args.get("slug")
     anilist_id = request.args.get("id")
     ep = request.args.get("ep", "1")
+    audio_type = request.args.get("type", "sub")
+    audio_type = "dub" if audio_type.lower().startswith("d") else "sub"
     if anilist_id:
         try:
             aid = int(anilist_id)
@@ -193,7 +195,7 @@ def servers_route():
     except ValueError:
         return jsonify({"error": "ep must be an integer"}), 400
     try:
-        srvs = _all_providers(slug, ep_n)
+        srvs = _all_providers(slug, ep_n, audio_type)
     except Exception as e:
         return jsonify({"error": f"servers failed: {e}", "source": "anikage"}), 502
     out = [{"id": s.get("id"), "name": s.get("label") or s.get("id"),
