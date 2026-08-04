@@ -198,7 +198,7 @@ def servers_route():
         srvs = _all_providers(slug, ep_n, audio_type)
     except Exception as e:
         return jsonify({"error": f"servers failed: {e}", "source": "anikage"}), 502
-    out = [{"id": s.get("id"), "name": s.get("label") or s.get("id"),
+    out = [{"id": s.get("id"), "name": s.get("name") or s.get("id"),
             "subTypes": s.get("subTypes", ["sub"])} for s in srvs]
     return jsonify({"slug": slug, "episode": ep_n, "servers": out})
 
