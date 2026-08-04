@@ -108,27 +108,38 @@ def fetch_servers(slug, ep):
 
 
 # ---------- stream ----------
-def resolve_stream(slug, ep, provider=None):
+def resolve_stream(slug, ep, provider=None, type="sub"):
+    """Resolve an m3u8 for a slug/ep. `type` is 'sub' or 'dub' — anikage's
+    sources endpoint takes &type= and returns empty when that type is missing
+    for the episode, so callers must surface the failure instead of faking sub."""
     ref = f"{BASE}/anime/watch/{slug}"
     servers = fetch_servers(slug, ep)
     srvs = servers.get("servers", [])
     if not srvs:
         return {"slug": slug, "episode": ep, "error": "no servers",
                 "raw": servers}
+    # Only consider providers that actually support the requested audio type.
+    # anikage reports subTypes per provider; a provider without the requested type
+    # (e.g. "dub") MUST NOT be used, or we'd silently play sub / a wrong source.
+    wanted = type if type in ("sub", "dub") else "sub"
+    type_ok = [s for s in srvs if wanted in (s.get("subTypes") or [])]
+    if not type_ok:
+        return {"slug": slug, "episode": ep, "error": f"no {wanted} provider for this episode",
+                "providers": [s["id"] for s in srvs]}
     # resolve one provider at a time; prefer the requested/default, but fall back
-    # to the first provider whose embed actually exposes a playable m3u8.
+    # to the first provider (of the type-compatible set) whose embed exposes m3u8.
     order = []
     if provider:
-        order.append(next((s for s in srvs if s["id"] == provider), None))
-    order.append(next((s for s in srvs if s.get("default")), None))
-    order += [s for s in srvs if s not in order]
+        order.append(next((s for s in type_ok if s["id"] == provider), None))
+    order.append(next((s for s in type_ok if s.get("default")), None))
+    order += [s for s in type_ok if s not in order]
     order = [s for s in order if s]
 
     last = None
     for s in order:
         pid = s["id"]
         try:
-            src = api_get(f"media/anime/{slug}/episodes/{ep}/sources?provider={pid}",
+            src = api_get(f"media/anime/{slug}/episodes/{ep}/sources?provider={pid}&type={type}",
                           referer=ref)
         except Exception as e:
             last = {"slug": slug, "episode": ep, "provider": pid,
