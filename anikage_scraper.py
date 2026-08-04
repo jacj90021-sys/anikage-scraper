@@ -108,16 +108,14 @@ def fetch_servers(slug, ep):
 
 
 def _all_providers(slug, ep, type="sub"):
-    """The real server list anikage exposes is the `embeds` array of the
-    sources response (HD-1 vivibebe, HD-2 bibiemb, StreamHG, Earnvids,
-    Doodstream, ... each as softsub/hardsub). Return unified provider dicts
-    tagged with the audio type each supports, so the UI can list + filter them."""
-    embeds = _embed_servers(slug, ep, type)
+    """anikage's real server list, named exactly like the site:
+    Servers (Neko/Ken/Megg/Wave/Koto) + Embeds (E-Neko/E-Ken/E-Koto/E-Wish).
+    Returns provider dicts tagged with the audio type each supports."""
+    servers = _embed_servers(slug, ep, type)
     out = []
-    for e in embeds:
-        srv = e.get("server") or e.get("url")
-        etype = "dub" if e.get("type") == "hardsub" else "sub"
-        out.append({"id": srv, "default": False, "subTypes": [etype], "label": srv})
+    for s in servers:
+        etype = "dub" if s.get("type") == "hardsub" else "sub"
+        out.append({"id": s["id"], "name": s["name"], "subTypes": [etype]})
     return out
 
 
@@ -142,71 +140,123 @@ def _extract_m3u8(html, embed_url):
     return u
 
 
+def _display_name(server_id):
+    """Map anikage's server id to the display name shown on the site
+    (screenshot: Neko/Ken/Megg/Wave/Koto). 'dib' is aliased to 'Ken' in the
+    frontend (Je={...,ken:{backend:neko,...}})."""
+    return {"neko": "Neko", "megg": "Megg", "wave": "Wave", "koto": "Koto",
+            "dib": "Ken"}.get(server_id, server_id.title())
+
+
+# anikage embed id -> (backend provider, display label) per frontend mapping
+# vt={softsub:neko, hardsub:neko, koto:koto, wish:koto}; labels from servers embeds
+_EMBED_LABELS = {"softsub": "E-Neko", "hardsub": "E-Ken", "koto": "E-Koto", "wish": "E-Wish"}
+_EMBED_BACKEND = {"softsub": "neko", "hardsub": "neko", "koto": "koto", "wish": "koto"}
+
+
 def _embed_servers(slug, ep, lang):
-    """anikage's real server list lives in the `embeds` array of the sources
-    response (HD-1 vivibebe, HD-2 bibiemb, StreamHG, Earnvids, Doodstream, ...
-    each tagged type 'softsub' or 'hardsub'). anikage's `lang` param is unreliable
-    (lang=dub returns empty, lang=sub returns BOTH softsub+hardsub), so we always
-    fetch lang=sub to get the full embed list, then filter by the `type` field:
-    softsub -> sub, hardsub -> dub."""
+    """anikage's REAL server list, named exactly like the site.
+
+    Two groups (matches the anikage watch UI):
+      * Servers: Neko, Ken, Megg, Wave, Koto  (from the `servers` API ids)
+      * Embeds:  E-Neko, E-Ken, E-Koto, E-Wish (from the `servers` API embeds,
+                 each with a `label` anikage itself provides)
+
+    We return a unified list of {id, name, backend, embed_id, type} so the
+    resolver can fetch the right stream while the UI shows the site's names.
+    anikage's `lang` param is unreliable (lang=dub returns empty), so we always
+    fetch lang=sub and select by the embed `type` (softsub=sub, hardsub=dub)."""
     ref = f"{BASE}/anime/watch/{slug}"
-    src = api_get(f"media/anime/{slug}/episodes/{ep}/sources?provider=neko&lang=sub",
+    srvs = fetch_servers(slug, ep)
+    out = []
+    # Servers row (Neko/Ken/Megg/Wave/Koto) — each is a provider selector.
+    for s in (srvs.get("servers", []) or []):
+        sid = s.get("id")
+        out.append({"id": sid, "name": _display_name(sid), "backend": sid,
+                    "embed_id": None, "type": "softsub"})
+    # Embeds row (E-Neko/E-Ken/E-Koto/E-Wish) — anikage gives the label.
+    for e in (srvs.get("embeds", []) or []):
+        eid = e.get("id")  # softsub/hardsub/koto/wish
+        label = e.get("label") or _EMBED_LABELS.get(eid, eid)
+        out.append({"id": eid, "name": label, "backend": _EMBED_BACKEND.get(eid, eid),
+                    "embed_id": eid, "type": "hardsub" if eid == "hardsub" else "softsub"})
+    return out
+
+
+def _embed_url(slug, ep, backend, embed_id, wanted_type):
+    """Fetch the real stream url for a (backend, embed_id) pair. The sources
+    response's `embeds` array carries {url, server, type}; we pick the entry
+    matching the requested embed_id (or type when embed_id is None)."""
+    ref = f"{BASE}/anime/watch/{slug}"
+    src = api_get(f"media/anime/{slug}/episodes/{ep}/sources?provider={backend}&lang=sub",
                   referer=ref)
     embeds = src.get("embeds", []) or []
     if not embeds:
         s0 = (src.get("sources") or [])
         if s0 and s0[0].get("embedUrl"):
-            embeds = [{"url": s0[0]["embedUrl"], "server": "default", "type": "softsub"}]
-    return embeds
+            return [{"url": s0[0]["embedUrl"], "server": "default", "type": "softsub"}]
+    # pick by embed_id (softsub/hardsub/koto/wish) if given, else by type
+    if embed_id:
+        match = [e for e in embeds if e.get("type") == embed_id]
+        if not match:
+            match = embeds
+    else:
+        match = [e for e in embeds if e.get("type") == wanted_type] or embeds
+    return match
 
 
 def resolve_stream(slug, ep, provider=None, type="sub"):
-    """Resolve an m3u8 for a slug/ep. `type` is 'sub' or 'dub'. anikage exposes
-    its REAL multi-server list under the sources response's `embeds` array (not
-    the single `sources[0].embedUrl` the old code used). We enumerate every
-    embed server, pick the requested audio type, and return the first one whose
-    embed page yields a playable m3u8. If the requested type (e.g. dub) has no
-    embed, we return a clean error — never a silent sub fallback."""
+    """Resolve an m3u8 for a slug/ep using anikage's REAL named servers.
+    `type` is 'sub' or 'dub'. Returns the first working server, named exactly
+    like the site (Neko/Ken/.../E-Neko/...). If the requested audio type has no
+    server, returns a clean error — never a silent fallback."""
     wanted = "hardsub" if type == "dub" else "softsub"
-    embeds = _embed_servers(slug, ep, type)
-    if not embeds:
-        return {"slug": slug, "episode": ep, "error": "no embeds for this episode"}
-    # filter by requested audio type
-    typed = [e for e in embeds if e.get("type") == wanted]
+    servers = _embed_servers(slug, ep, type)
+    if not servers:
+        return {"slug": slug, "episode": ep, "error": "no servers for this episode"}
+    # only servers that can serve the requested audio type
+    typed = [s for s in servers if s["type"] == wanted or s["embed_id"] is None]
     if not typed:
         return {"slug": slug, "episode": ep,
-                "error": f"no {type} (embed type {wanted}) server for this episode",
-                "providers": [e.get("server") for e in embeds]}
-    # order: requested provider first, then as listed
+                "error": f"no {type} server for this episode",
+                "providers": [s["name"] for s in servers]}
+    # order: requested provider (by id or display name) first
     order = []
     if provider:
-        order += [e for e in typed if e.get("server") == provider]
-    order += [e for e in typed if e not in order]
+        order += [s for s in typed if s["id"] == provider or s["name"] == provider]
+    order += [s for s in typed if s not in order]
 
     ref = f"{BASE}/anime/watch/{slug}"
     last = None
-    for e in order:
-        url = e.get("url")
-        if not url:
-            continue
+    for s in order:
         try:
-            emb_html = get(url, referer=url)
+            embeds = _embed_url(slug, ep, s["backend"], s["embed_id"], wanted)
         except Exception as ex:
-            last = {"slug": slug, "episode": ep, "server": e.get("server"),
-                    "error": f"embed fetch failed: {ex}"}
+            last = {"slug": slug, "episode": ep, "server": s["name"],
+                    "error": f"sources failed: {ex}"}
             continue
-        m3u8 = _extract_m3u8(emb_html, url)
-        if m3u8:
-            from urllib.parse import urlparse
-            referer_host = f"{urlparse(url).scheme}://{urlparse(url).netloc}/"
-            return {
-                "slug": slug, "episode": ep, "provider": e.get("server"),
-                "providers": [x.get("server") for x in embeds],
-                "embedUrl": url, "m3u8": m3u8, "referer": referer_host,
-            }
-        last = {"slug": slug, "episode": ep, "server": e.get("server"),
-                "error": "m3u8 not found in embed page"}
-    return last or {"slug": slug, "episode": ep, "error": "no embed server yielded m3u8"}
+        for e in embeds:
+            url = e.get("url")
+            if not url:
+                continue
+            try:
+                emb_html = get(url, referer=url)
+            except Exception as ex:
+                last = {"slug": slug, "episode": ep, "server": s["name"],
+                        "error": f"embed fetch failed: {ex}"}
+                continue
+            m3u8 = _extract_m3u8(emb_html, url)
+            if m3u8:
+                from urllib.parse import urlparse
+                referer_host = f"{urlparse(url).scheme}://{urlparse(url).netloc}/"
+                return {
+                    "slug": slug, "episode": ep, "provider": s["name"],
+                    "providers": [x["name"] for x in servers],
+                    "embedUrl": url, "m3u8": m3u8, "referer": referer_host,
+                }
+            last = {"slug": slug, "episode": ep, "server": s["name"],
+                    "error": "m3u8 not found in embed page"}
+    return last or {"slug": slug, "episode": ep, "error": "no server yielded m3u8"}
 
 
 def main():
