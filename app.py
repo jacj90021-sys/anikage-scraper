@@ -121,6 +121,8 @@ def sources():
     slug = request.args.get("slug")
     anilist_id = request.args.get("id")
     ep = request.args.get("ep", "1")
+    audio_type = request.args.get("type", "sub")          # "sub" | "dub"
+    audio_type = "dub" if audio_type.lower().startswith("d") else "sub"
 
     if anilist_id:
         # EXACT path: anilist id -> slug via cached index (no title guessing)
@@ -142,13 +144,16 @@ def sources():
         return jsonify({"error": "ep must be an integer"}), 400
 
     try:
-        res = resolve_stream(slug, ep_n)
+        res = resolve_stream(slug, ep_n, type=audio_type)
     except Exception as e:
         return jsonify({"error": f"resolve failed: {e}", "source": "anikage"}), 502
 
     m3u8 = res.get("m3u8")
     if not m3u8:
-        return jsonify({"error": "no m3u8 resolved", "source": "anikage",
+        # anikage returns empty when the requested type (e.g. dub) isn't available
+        # for this episode. Surface it honestly — do NOT silently fall back to sub.
+        return jsonify({"error": f"no {audio_type} stream resolved for this episode on anikage",
+                        "source": "anikage", "type": audio_type,
                         "slug": slug, "providers": res.get("providers", [])}), 404
 
     # Normalize to the same shape the app expects from anidb/anizone:
@@ -156,12 +161,44 @@ def sources():
         "source": "anikage",
         "slug": slug,
         "episode": ep_n,
+        "type": audio_type,
         "m3u8": m3u8,
         "referer": res.get("referer") or REFERER,
         "chosen_provider": res.get("provider"),
         "embedUrl": res.get("embedUrl"),
         "providers": res.get("providers", []),
     })
+
+
+@app.route("/api/servers")
+def servers_route():
+    """List providers for an episode WITH their subTypes, so the app can filter
+    by sub/dub. Resolved by anilist id or slug (exact)."""
+    slug = request.args.get("slug")
+    anilist_id = request.args.get("id")
+    ep = request.args.get("ep", "1")
+    if anilist_id:
+        try:
+            aid = int(anilist_id)
+        except ValueError:
+            return jsonify({"error": "id must be an integer anilist id"}), 400
+        idx = build_index()
+        slug = idx.get(aid)
+        if not slug:
+            return jsonify({"error": f"anilist id {aid} not found on anikage", "source": "anikage"}), 404
+    if not slug:
+        return jsonify({"error": "missing slug or id"}), 400
+    try:
+        ep_n = int(ep)
+    except ValueError:
+        return jsonify({"error": "ep must be an integer"}), 400
+    try:
+        srvs = fetch_servers(slug, ep_n).get("servers", [])
+    except Exception as e:
+        return jsonify({"error": f"servers failed: {e}", "source": "anikage"}), 502
+    out = [{"id": s.get("id"), "name": s.get("id"),
+            "subTypes": s.get("subTypes", ["sub"])} for s in srvs]
+    return jsonify({"slug": slug, "episode": ep_n, "servers": out})
 
 
 if __name__ == "__main__":
