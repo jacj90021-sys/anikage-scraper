@@ -39,14 +39,19 @@ _index_built_at = 0
 
 
 def _slug_anilist(slug):
-    """Read the anilistId for a slug from anikage's episode API."""
-    try:
-        d = api_get(f"media/anime/{slug}/episodes",
-                    referer=f"{BASE}/anime/watch/{slug}")
-        aid = d.get("anilistId")
-        return int(aid) if aid else None
-    except Exception:
-        return None
+    """Read the anilistId for a slug from anikage's episode API (retry on 429)."""
+    for attempt in range(4):
+        try:
+            d = api_get(f"media/anime/{slug}/episodes",
+                        referer=f"{BASE}/anime/watch/{slug}")
+            aid = d.get("anilistId")
+            return int(aid) if aid else None
+        except Exception as e:
+            if "429" in str(e) and attempt < 3:
+                time.sleep(2 * (attempt + 1))
+                continue
+            return None
+    return None
 
 
 def build_index(force=False):
@@ -72,6 +77,7 @@ def build_index(force=False):
             aid = _slug_anilist(slug)
             if aid:
                 new_index[aid] = slug
+            time.sleep(0.5)  # avoid anikage rate-limiting during the one-time crawl
         if new_index:
             _index = new_index
             _index_built_at = time.time()
