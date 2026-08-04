@@ -107,14 +107,33 @@ def fetch_servers(slug, ep):
     return d
 
 
+def _all_providers(slug, ep):
+    """Merge the `servers` list AND the `embeds` list (anikage exposes extra
+    servers like E-Neko/E-Ken/E-Koto/E-Wish under `embeds` that the main
+    `servers` list omits). Returns a unified list of provider dicts with the
+    `subTypes` each supports."""
+    d = fetch_servers(slug, ep)
+    srvs = d.get("servers", []) or []
+    seen = {s.get("id") for s in srvs}
+    merged = list(srvs)
+    for e in (d.get("embeds", []) or []):
+        eid = e.get("id")
+        if eid and eid not in seen:
+            # embeds don't carry subTypes from the API; assume sub (most common)
+            merged.append({"id": eid, "default": False,
+                           "subTypes": e.get("subTypes") or ["sub"],
+                           "label": e.get("label")})
+            seen.add(eid)
+    return merged
+
+
 # ---------- stream ----------
 def resolve_stream(slug, ep, provider=None, type="sub"):
     """Resolve an m3u8 for a slug/ep. `type` is 'sub' or 'dub' — anikage's
     sources endpoint takes &type= and returns empty when that type is missing
     for the episode, so callers must surface the failure instead of faking sub."""
     ref = f"{BASE}/anime/watch/{slug}"
-    servers = fetch_servers(slug, ep)
-    srvs = servers.get("servers", [])
+    srvs = _all_providers(slug, ep)
     if not srvs:
         return {"slug": slug, "episode": ep, "error": "no servers",
                 "raw": servers}
