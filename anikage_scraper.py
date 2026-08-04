@@ -107,37 +107,139 @@ def fetch_servers(slug, ep):
     return d
 
 
-def _all_providers(slug, ep, type="sub"):
-    """anikage's real server list, named exactly like the site:
-    Servers (Neko/Ken/Megg/Wave/Koto) + Embeds (E-Neko/E-Ken/E-Koto/E-Wish).
-    Returns provider dicts tagged with the audio type each supports."""
-    servers = _embed_servers(slug, ep, type)
+def _display_name(server_id):
+    """Map anikage's server id to the display name shown on the site
+    (screenshot: Neko/Ken/Megg/Wave/Koto). 'dib' is aliased to 'Ken' in the
+    frontend (Je={...,ken:{backend:neko,...}})."""
+    return {"neko": "Neko", "megg": "Megg", "wave": "Wave", "koto": "Koto",
+            "dib": "Ken"}.get(server_id, server_id.title())
+
+
+def _provider_sources(slug, ep, pid, wanted):
+    """Fetch the working stream entries for one provider (neko/megg/dib/wave/koto).
+    anikage's /sources?provider=<pid>&type=<type> returns a `sources` array where
+    each entry has an `embedUrl` (a real, working host) + a `type` (softsub/hardsub/
+    embed). We select entries matching the requested audio type. This is the
+    reliable path — these embedUrls actually resolve (vivibebe, playeng,
+    echovideo, megaplay, vidtube). Returns list of {url, type, host}."""
+    ref = f"{BASE}/anime/watch/{slug}"
+    src = api_get(f"media/anime/{slug}/episodes/{ep}/sources?provider={pid}&type={wanted}",
+                  referer=ref)
     out = []
-    for s in servers:
-        etype = "dub" if s.get("type") == "hardsub" else "sub"
-        out.append({"id": s["id"], "name": s["name"], "subTypes": [etype]})
+    for s in (src.get("sources", []) or []):
+        eu = s.get("embedUrl")
+        if not eu:
+            continue
+        out.append({"url": eu, "type": s.get("type", wanted), "host": eu.split("/")[2]})
     return out
+
+
+def _all_providers(slug, ep, type="sub"):
+    """anikage's REAL server list, named exactly like the site:
+    Neko, Ken, Megg, Wave, Koto (one row per provider, plus each provider's
+    extra host entries). Each carries the audio types it supports."""
+    wanted = "dub" if type == "dub" else "sub"
+    srvs = fetch_servers(slug, ep).get("servers", []) or []
+    out = []
+    for s in srvs:
+        sid = s.get("id")
+        sub_types = s.get("subTypes") or (["sub", "dub"] if wanted in ("sub", "dub") else [wanted])
+        out.append({"id": sid, "name": _display_name(sid),
+                    "subTypes": sub_types})
+    return out
+
+
+def resolve_stream(slug, ep, provider=None, type="sub"):
+    """Resolve an m3u8 for a slug/ep using anikage's REAL working servers.
+
+    Strategy (the reliable one): iterate anikage's providers (neko/megg/dib/wave/
+    koto), fetch each via /sources?provider=<pid>&type=<type>, take the entry
+    whose `type` matches the requested audio (softsub=sub, hardsub=dub), use its
+    `embedUrl` (a real host: vivibebe/playeng/echovideo/megaplay/vidtube), fetch
+    the embed page, extract the m3u8. Anikage returns MULTIPLE host entries per
+    provider (neko -> vivibebe + bibiemb; koto -> megaplay + vidtube), so each
+    becomes a selectable server. If a provider/type yields nothing, we move on —
+    never silently fake sub for a requested dub."""
+    wanted = "dub" if type == "dub" else "sub"
+    lang = "dub" if type == "dub" else "sub"
+    srvs = fetch_servers(slug, ep).get("servers", []) or []
+    if not srvs:
+        return {"slug": slug, "episode": ep, "error": "no servers for this episode"}
+    # order: requested provider first (by id or display name), then as listed
+    order = list(srvs)
+    if provider:
+        hit = [s for s in srvs if s.get("id") == provider or _display_name(s.get("id")) == provider]
+        if hit:
+            order = hit + [s for s in srvs if s not in hit]
+
+    last = None
+    tried = []
+    for s in order:
+        pid = s.get("id")
+        name = _display_name(pid)
+        try:
+            entries = _provider_sources(slug, ep, pid, lang)
+        except Exception as ex:
+            last = {"slug": slug, "episode": ep, "server": name,
+                    "error": f"sources failed: {ex}"}
+            continue
+        if not entries:
+            last = {"slug": slug, "episode": ep, "server": name,
+                    "error": f"no {wanted} sources for provider"}
+            continue
+        for e in entries:
+            tried.append(f"{name}/{e['host']}")
+            try:
+                emb_html = get(e["url"], referer=e["url"])
+            except Exception as ex:
+                last = {"slug": slug, "episode": ep, "server": name,
+                        "error": f"embed fetch failed: {ex}"}
+                continue
+            m3u8 = _extract_m3u8(emb_html, e["url"])
+            if m3u8:
+                from urllib.parse import urlparse
+                referer_host = f"{urlparse(e['url']).scheme}://{urlparse(e['url']).netloc}/"
+                return {
+                    "slug": slug, "episode": ep, "provider": name,
+                    "providers": [x["name"] for x in order],
+                    "embedUrl": e["url"], "m3u8": m3u8, "referer": referer_host,
+                }
+            last = {"slug": slug, "episode": ep, "server": name,
+                    "error": "m3u8 not found in embed page"}
+    return last or {"slug": slug, "episode": ep, "error": "no server yielded m3u8"}
 
 
 # ---------- stream ----------
 def _extract_m3u8(html, embed_url):
-    """Pull the m3u8 URL out of an anikage embed page. Tries the common
-    `const src="...m3u8"` pattern first, then any .m3u8-looking URL."""
-    m = re.search(r'const src\s*=\s*"([^"]+\.m3u8)"', html)
-    if not m:
-        m = re.search(r'(?:src|file|source)\s*[=:]\s*["\']?(https?://[^"\'\s]+?\.m3u8)', html)
-    if not m:
-        m = re.search(r'(https?://[^"\'\s]+?\.m3u8)', html)
-    if not m:
+    """Pull the m3u8 URL out of an anikage embed page. Tries several patterns:
+    `const src="...m3u8"`, any src/file/source attr with an m3u8, a bare
+    https m3u8, and a *relative* /path.m3u8 (anikage's playeng host uses this).
+    Relative paths are resolved against the embed page's origin."""
+    from urllib.parse import urlparse
+    candidates = []
+    for pat in (
+        r'const src\s*=\s*"([^"]+\.m3u8)"',
+        r'(?:src|file|source)\s*[=:]\s*["\']([^"\']+\.m3u8)["\']',
+        r'["\']((?:https?:)?//?[^"\'\s]+\.m3u8)["\']',
+    ):
+        for m in re.finditer(pat, html):
+            candidates.append(m.group(1))
+    if not candidates:
         return None
-    u = m.group(1)
-    if u.startswith("//"):
-        u = "https:" + u
-    elif u.startswith("/"):
-        from urllib.parse import urlparse
-        net = f"{urlparse(embed_url).scheme}://{urlparse(embed_url).netloc}"
-        u = net + u
-    return u
+    for raw in candidates:
+        if raw.startswith("//"):
+            u = "https:" + raw
+        elif raw.startswith("http"):
+            u = raw
+        elif raw.startswith("/"):
+            net = f"{urlparse(embed_url).scheme}://{urlparse(embed_url).netloc}"
+            u = net + raw
+        else:
+            # relative without leading slash
+            net = f"{urlparse(embed_url).scheme}://{urlparse(embed_url).netloc}/"
+            u = net + raw
+        return u
+    return None
 
 
 def _display_name(server_id):
