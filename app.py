@@ -24,7 +24,7 @@ import urllib.parse
 import urllib.request
 from flask import Flask, request, jsonify
 
-from anikage_scraper import BASE, UA, api_get, scrape_homepage, resolve_stream, fetch_servers, _all_providers
+from anikage_scraper import BASE, UA, api_get, scrape_homepage, resolve_stream
 
 # anikage's embeds need a Referer from the embed host; resolve_stream returns the
 # correct per-embed referer. This is just a fallback default.
@@ -144,7 +144,7 @@ def sources():
         return jsonify({"error": "ep must be an integer"}), 400
 
     try:
-        res = resolve_stream(slug, ep_n, provider=request.args.get("provider"), type=audio_type)
+        res = resolve_stream(slug, ep_n, type=audio_type)
     except Exception as e:
         return jsonify({"error": f"resolve failed: {e}", "source": "anikage"}), 502
 
@@ -177,8 +177,6 @@ def servers_route():
     slug = request.args.get("slug")
     anilist_id = request.args.get("id")
     ep = request.args.get("ep", "1")
-    audio_type = request.args.get("type", "sub")
-    audio_type = "dub" if audio_type.lower().startswith("d") else "sub"
     if anilist_id:
         try:
             aid = int(anilist_id)
@@ -195,10 +193,10 @@ def servers_route():
     except ValueError:
         return jsonify({"error": "ep must be an integer"}), 400
     try:
-        srvs = _all_providers(slug, ep_n, audio_type)
+        srvs = fetch_servers(slug, ep_n).get("servers", [])
     except Exception as e:
         return jsonify({"error": f"servers failed: {e}", "source": "anikage"}), 502
-    out = [{"id": s.get("id"), "name": s.get("name") or s.get("id"),
+    out = [{"id": s.get("id"), "name": s.get("id"),
             "subTypes": s.get("subTypes", ["sub"])} for s in srvs]
     return jsonify({"slug": slug, "episode": ep_n, "servers": out})
 
