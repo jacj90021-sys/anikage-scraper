@@ -1,0 +1,81 @@
+{
+  "name": "anime-stream-scraping-playbook",
+  "purpose": "Reusable methods for scraping real playable anime streams (m3u8/mp4 + referer + subtitles) from aggregator sites, so another AI can apply them to any site.",
+  "golden_rules": [
+    "A proxy path (cors.x.com/proxy/e/...) is NEVER the real URL; resolve or verify it.",
+    "Verify every claim with a real fetch: 200 + valid #EXTM3U + a segment that downloads.",
+    "Referer is mandatory on SEGMENTS, not just the master.",
+    "Upstream episode.id / titles lie; trust the resolved URL + on-device playback.",
+    "Don't drop a server as 'browser-only' until you've tried node-decode of its client JS.",
+    "Bind Flask to $PORT for Render; absolutize subtitle URLs; use 2-letter lang codes."
+  ],
+  "methods": {
+    "M1_cors_proxy_passthrough": {
+      "symptom": "API returns cors.<site>.com/proxy/e/<token>",
+      "mechanism": "GET the proxy URL with the site referer; it returns the real m3u8 (segments may be relative).",
+      "verified_on": ["just4anime jin", "just4anime sai/mai (otakuhg-backed)"],
+      "risk": "Cloudflare intermittently 403s datacenter IPs."
+    },
+    "M2_embed_m3u8_extraction": {
+      "symptom": "API gives an iframe URL; page JS contains a literal m3u8",
+      "mechanism": "GET iframe; regex the literal https://<host>/.../master.m3u8; referer = iframe host.",
+      "verified_on": ["kai/zeke -> vivibebe.site", "bibiemb.xyz", "vibevibe.workers.dev"]
+    },
+    "M3_node_packer_decode": {
+      "symptom": "Player page has eval(function(p,a,c,k,e,d){...}) packer; real URL hidden",
+      "mechanism": "Extract balanced-paren eval block; run in node with jwplayer.setup hook; read SETUP_FILE.",
+      "verified_on": ["otakuhg.site (sai/mai)"],
+      "requires": "node on host (shutil.which('node'))"
+    },
+    "M4_self_resolve_from_source": {
+      "symptom": "Aggregator returns WRONG anime/ep (mislabeled mapping)",
+      "mechanism": "Identify real source; resolve correct episode by title/slug; pick typed mirror tab (raw/sub/dub).",
+      "verified_on": ["ryuk -> animegg.org"]
+    },
+    "M5_redirect_follow_mp4": {
+      "symptom": "Stream is .mp4 with 302 to CDN",
+      "mechanism": "Return play/<id>/video.mp4; hardcode Referer (API often omits it).",
+      "verified_on": ["animegg/ryuk -> vidcache.net"]
+    },
+    "M6_api_contract_mirror": {
+      "symptom": "Want new scraper to plug into existing app with no app changes",
+      "mechanism": "Flask API with /servers, /stream, /proxy matching anikage contract; bind $PORT.",
+      "verified_on": ["just4anime-scraper mirrors anikage-scraper"]
+    },
+    "M7_subtitle_handling": {
+      "symptom": "Video plays, subtitles don't show",
+      "mechanism": "Absolutize subtitle URL against backend BASE; use 2-letter lang (en not eng); proxy same-origin.",
+      "verified_on": ["anikage (relative Uri bug fix)"]
+    },
+    "M8_title_to_slug": {
+      "symptom": "Have title, need source slug",
+      "mechanism": "lowercase+hyphenate; try -tv/-dub variants; reuse aggregator slug when valid; reject corrupt (e.g. your-name).",
+      "verified_on": ["ryuk/animegg"]
+    }
+  },
+  "sites": {
+    "just4anime.online": {
+      "api": "https://api.just4anime.online/api/v1/meta/sources/<anilistId>?provider=<srv>&num=<ep>&type=<sub|dub|hsub>",
+      "servers": {
+        "kai":  {"method": "M2", "source": "vivibebe.site", "referer": "https://vivibebe.site/", "status": "works"},
+        "zeke": {"method": "M2", "source": "bibiemb.xyz/vibevibe.workers.dev", "referer": "host", "status": "works"},
+        "jin":  {"method": "M1", "source": "megaplay", "referer": "https://megaplay.buzz/", "status": "works (CF risk)"},
+        "ryuk": {"method": "M4", "source": "animegg.org", "referer": "https://animegg.org/", "status": "works"},
+        "sai":  {"method": "M3", "source": "otakuhg.site", "referer": "https://otakuhg.site/", "status": "works"},
+        "mai":  {"method": "M3", "source": "otakuhg.site", "referer": "https://otakuhg.site/", "status": "works"},
+        "echo": {"method": "none", "source": "just4anime encrypted proxy", "status": "not resolvable server-side"}
+      }
+    },
+    "otakuhg.site": {"method": "M3", "detail": "packed jwplayer; node-decode -> master.txt on random *.site/*.space CDN; referer mandatory"},
+    "animegg.org": {"method": "M4/M5", "detail": "typed mirror tabs; play/<id>/video.mp4 302 -> vidcache; referer mandatory"},
+    "vivibebe.site": {"method": "M2", "detail": "literal m3u8 in iframe JS"},
+    "megaplay": {"method": "M1", "detail": "trust aggregator-resolved URL; don't re-derive id from anilist"},
+    "anikage.cc": {"method": "M2/M6/M7", "detail": "first backend; subtitle absolutization + 2-letter lang"}
+  },
+  "templates": [
+    "templates/node_packer_decode.js",
+    "templates/hls_referer_fetch.py",
+    "templates/flask_api_template.py"
+  ],
+  "decision_tree": "API url? cors token(M1) -> fetch+referer; iframe(M2) -> literal or packer(M3); wrong content(M4); .mp4(M5). Always verify 200+HLS+segment, always absolutize subs (M7)."
+}

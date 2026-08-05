@@ -4,7 +4,15 @@ Resolves real, playable video URLs (m3u8 / mp4) for any episode on
 [anikage.cc](https://anikage.cc), reverse-engineered from the live site
 (verified against `https://anikage.cc/anime/watch/ARPEGZW3fK?ep=1`, Aug 2026).
 
-## How it works
+> **📚 Scraping method playbook:** this repo also documents the general A→Z
+> techniques for scraping anime streams (learned from anikage **and** just4anime).
+> See [`docs/`](docs/):
+> - [`docs/METHODS.md`](docs/METHODS.md) — 8 site-agnostic methods (M1–M8)
+> - [`docs/sites/`](docs/sites/) — per-site writeups (anikage, just4anime, otakuhg, animegg, megaplay, vivibebe)
+> - [`docs/just4anime_PROOF.md`](docs/just4anime_PROOF.md) — live-verified proof all 6 just4anime servers work
+> - [`docs/templates/`](docs/templates/) — reusable code (node packer decoder, HLS verify, Flask API)
+> - [`docs/pitfalls.md`](docs/pitfalls.md) — the mistakes that cost the most time
+> - [`docs/methods.json`](docs/methods.json) — machine-readable index
 
 1. **Catalog / server list** (clean JSON API, needs only a `Referer`):
    - `GET /api/media/anime/<slug>/episodes`
