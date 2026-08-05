@@ -74,8 +74,8 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 _TOKEN_KEY = b"aproxy2026"
 
 # server id -> display name (matches the site's Servers row)
-_DISPLAY = {"neko": "Neko", "megg": "Megg", "dib": "Ken",
-            "wave": "Wave", "koto": "Koto"}
+_DISPLAY = {"neko": "Neko", "megg": "Megg", "dib": "Dib",
+             "wave": "Wave", "koto": "Koto"}
 
 # embed id -> (backend provider, source type filter, embed-host filter)
 # The embeds are the site's Embeds row; each maps to a DISTINCT source pick.
