@@ -108,26 +108,41 @@ def fetch_servers(slug, ep):
 
 
 # ---------- stream ----------
-def resolve_stream(slug, ep, provider=None, type="sub"):
-    """Resolve an m3u8 for a slug/ep. `type` is 'sub' or 'dub' — anikage's
-    sources endpoint takes &type= and returns empty when that type is missing
-    for the episode, so callers must surface the failure instead of faking sub."""
+def resolve_stream(slug, ep, provider=None, lang="sub"):
+    """Resolve real stream URLs for a slug/ep.
+
+    The sources API returns OBFUSCATED `url` blobs. Decoding = wrapping the blob
+    with anikage's own proxy (PUBLIC_PROXY_URL from their frontend chunk):
+        m3u8 -> https://prox.anikage.cc/m3u8/<blob>
+        mp4  -> https://prox.anikage.cc/stream/<blob>
+    The proxy then serves/decrypts the actual HLS/MP4 content. Requests need
+    `Referer: https://anikage.cc/`. The site Cloudflare-challenges plain HTTP
+    clients, so use cloudscraper (or a real browser) to reach the API.
+    """
+    try:
+        import cloudscraper
+        _s = cloudscraper.create_scraper()
+        _get = lambda url, referer=None: _s.get(
+            url, headers={"Referer": referer} if referer else {},
+            timeout=30).text
+        # note: resolve_stream is called directly from main(); we patch the
+        # module-level get/curl path by swapping get() here
+        global get
+        get = lambda url, referer=None: _get(url, referer)
+    except Exception:
+        pass
+
     ref = f"{BASE}/anime/watch/{slug}"
     servers = fetch_servers(slug, ep)
     srvs = servers.get("servers", [])
     if not srvs:
         return {"slug": slug, "episode": ep, "error": "no servers",
                 "raw": servers}
-    # Only consider providers that actually support the requested audio type.
-    # anikage reports subTypes per provider; a provider without the requested type
-    # (e.g. "dub") MUST NOT be used, or we'd silently play sub / a wrong source.
-    wanted = type if type in ("sub", "dub") else "sub"
+    wanted = lang if lang in ("sub", "dub") else "sub"
     type_ok = [s for s in srvs if wanted in (s.get("subTypes") or [])]
     if not type_ok:
         return {"slug": slug, "episode": ep, "error": f"no {wanted} provider for this episode",
                 "providers": [s["id"] for s in srvs]}
-    # resolve one provider at a time; prefer the requested/default, but fall back
-    # to the first provider (of the type-compatible set) whose embed exposes m3u8.
     order = []
     if provider:
         order.append(next((s for s in type_ok if s["id"] == provider), None))
@@ -135,11 +150,13 @@ def resolve_stream(slug, ep, provider=None, type="sub"):
     order += [s for s in type_ok if s not in order]
     order = [s for s in order if s]
 
+    from urllib.parse import urlparse
     last = None
+    out = []
     for s in order:
         pid = s["id"]
         try:
-            src = api_get(f"media/anime/{slug}/episodes/{ep}/sources?provider={pid}&type={type}",
+            src = api_get(f"media/anime/{slug}/episodes/{ep}/sources?provider={pid}&lang={wanted}",
                           referer=ref)
         except Exception as e:
             last = {"slug": slug, "episode": ep, "provider": pid,
@@ -150,38 +167,24 @@ def resolve_stream(slug, ep, provider=None, type="sub"):
             last = {"slug": slug, "episode": ep, "provider": pid,
                     "error": "no sources", "raw": src}
             continue
-        embed_url = embeds[0].get("embedUrl", "")
-        if not embed_url:
-            last = {"slug": slug, "episode": ep, "provider": pid,
-                    "encrypted_url": embeds[0].get("url"),
-                    "error": "no embedUrl in source"}
-            continue
-        emb_html = get(embed_url, referer=embed_url)
-        m = re.search(r'const src\s*=\s*"([^"]+\.m3u8)"', emb_html)
-        if not m:
-            m = re.search(r'(https?://[^\s"\']+\.m3u8|/[^\s"\']+\.m3u8)', emb_html)
-        m3u8 = None
-        if m:
-            u = m.group(1)
-            if u.startswith("//"):
-                u = "https:" + u
-            elif u.startswith("/"):
-                from urllib.parse import urlparse
-                net = f"{urlparse(embed_url).scheme}://{urlparse(embed_url).netloc}"
-                u = net + u
-            m3u8 = u
-        if m3u8:
-            from urllib.parse import urlparse
-            referer_host = (f"{urlparse(embed_url).scheme}://"
-                            f"{urlparse(embed_url).netloc}/")
-            return {
+        for e in embeds:
+            blob = e.get("url", "")
+            if not blob:
+                continue
+            kind = "m3u8" if e.get("isM3U8") else "stream"
+            proxy_url = f"https://prox.anikage.cc/{kind}/{blob}"
+            out.append({
                 "slug": slug, "episode": ep, "provider": pid,
-                "providers": [s["id"] for s in srvs],
-                "embedUrl": embed_url, "m3u8": m3u8, "referer": referer_host,
-            }
-        last = {"slug": slug, "episode": ep, "provider": pid,
-                "embedUrl": embed_url, "error": "m3u8 not found in embed page"}
-    return last or {"slug": slug, "episode": ep, "error": "no provider yielded m3u8"}
+                "quality": e.get("quality"),
+                "isM3U8": bool(e.get("isM3U8")),
+                "embedUrl": e.get("embedUrl", ""),
+                "url": proxy_url,
+                "referer": f"{BASE}/",
+            })
+    if out:
+        return {"slug": slug, "episode": ep,
+                "providers": [s["id"] for s in srvs], "sources": out}
+    return last or {"slug": slug, "episode": ep, "error": "no provider yielded a source"}
 
 
 def main():
@@ -192,13 +195,14 @@ def main():
     ap.add_argument("--stream", action="store_true")
     ap.add_argument("--ep", default="1")
     ap.add_argument("--provider")
+    ap.add_argument("--lang", default="sub", choices=["sub", "dub"])
     ap.add_argument("--out", default="anikage_index")
     args = ap.parse_args()
 
     if args.stream:
         if not args.slug:
             print("ERROR: --slug required for --stream", file=sys.stderr); sys.exit(1)
-        print(json.dumps(resolve_stream(args.slug, args.ep, args.provider),
+        print(json.dumps(resolve_stream(args.slug, args.ep, args.provider, args.lang),
                          indent=2, ensure_ascii=False))
         return
 
