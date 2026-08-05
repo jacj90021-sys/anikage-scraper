@@ -232,6 +232,69 @@ def megaplay_extras(embed_url):
         return {}
 
 
+def list_streams(slug, ep, langs=("sub", "dub")):
+    """EVERYTHING an episode offers: every server x every audio lang x every
+    source type/quality, all decrypted to real playable URLs. No picking a
+    single default stream."""
+    servers = list_servers(slug, ep)
+    out = {"slug": slug, "episode": ep, "servers": [], "embeds": []}
+
+    for s in servers["servers"]:
+        sub_types = s.get("subTypes") or ["sub"]
+        entry = {"id": s["id"], "name": s["name"], "subTypes": sub_types,
+                 "sources": []}
+        seen_urls = set()
+        for lang in langs:
+            if lang not in sub_types:
+                continue
+            try:
+                d = fetch_sources(slug, ep, s["id"], lang)
+            except Exception as ex:
+                entry["sources"].append({"lang": lang, "error": str(ex)})
+                continue
+            for src in d.get("sources", []) or []:
+                real = decrypt_token(src.get("url"))
+                if not real:
+                    continue
+                if real in seen_urls:
+                    continue
+                seen_urls.add(real)
+                entry["sources"].append({
+                    "lang": lang,
+                    "type": src.get("type"),
+                    "quality": src.get("quality"),
+                    "format": "mp4" if not src.get("isM3U8") else "hls",
+                    "url": real,
+                    "referer": f"{urllib.parse.urlsplit(real).scheme}://"
+                               f"{urllib.parse.urlsplit(real).netloc}/",
+                    "embed_url": src.get("embedUrl"),
+                })
+            time.sleep(0.4)
+        out["servers"].append(entry)
+
+    # Embeds (E-Neko / E-Ken / E-Koto / E-Wish) resolve to the same streams
+    # already listed above (softsub/hardsub/koto). Add them as metadata so a
+    # page that shows only an embed label is still mapped to a real URL.
+    for e in servers["embeds"]:
+        want_type = e["id"] if e["backend"] == "neko" else None
+        try:
+            d = fetch_sources(slug, ep, e["backend"], "sub")
+            src = _pick_source(d, wanted_type=want_type)
+        except Exception:
+            src = None
+        real = decrypt_token((src or {}).get("url")) if src else None
+        out["embeds"].append({
+            "id": e["id"],
+            "label": e["label"],
+            "backend": e["backend"],
+            "type": want_type or "default",
+            "url": real,
+        })
+        time.sleep(0.4)
+
+    return out
+
+
 def resolve_stream(slug, ep, provider=None, lang="sub"):
     """Resolve a playable stream for slug/ep. `provider` may be a server id
     (neko/ken/megg/wave/koto/dib) or a display name (E-Neko, E-Ken, ...)."""
@@ -330,11 +393,21 @@ def main():
     ap.add_argument("--slug")
     ap.add_argument("--episodes", action="store_true")
     ap.add_argument("--stream", action="store_true")
+    ap.add_argument("--all", action="store_true",
+                    help="dump EVERY stream (all servers x sub/dub x qualities)")
     ap.add_argument("--ep", default="1")
     ap.add_argument("--provider")
     ap.add_argument("--lang", default="sub", choices=["sub", "dub"])
     ap.add_argument("--out", default="anikage_index")
     args = ap.parse_args()
+
+    if args.all:
+        if not args.slug:
+            print("ERROR: --slug required for --all", file=sys.stderr)
+            sys.exit(1)
+        print(json.dumps(list_streams(args.slug, args.ep),
+                         indent=2, ensure_ascii=False))
+        return
 
     if args.stream:
         if not args.slug:

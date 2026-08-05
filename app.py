@@ -5,8 +5,8 @@ import time
 
 from flask import Flask, jsonify, request
 
-from anikage_scraper import (fetch_episodes, list_servers, resolve_stream,
-                             scrape_homepage)
+from anikage_scraper import (fetch_episodes, list_servers, list_streams,
+                             resolve_stream, scrape_homepage)
 
 app = Flask(__name__)
 INDEX_CACHE = None
@@ -49,6 +49,15 @@ def servers(slug):
     ep = request.args.get("ep", "1")
     try:
         return jsonify(list_servers(slug, ep))
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 502
+
+
+@app.get("/api/anime/<slug>/streams")
+def streams(slug):
+    ep = request.args.get("ep", "1")
+    try:
+        return jsonify(list_streams(slug, ep))
     except Exception as ex:
         return jsonify({"error": str(ex)}), 502
 

@@ -40,7 +40,14 @@ python3 anikage_scraper.py --search "one piece"
 python3 anikage_scraper.py --stream --slug ARPEGZW3fK --ep 1          # default Neko
 python3 anikage_scraper.py --stream --slug ARPEGZW3fK --ep 1 --provider E-Wish
 python3 anikage_scraper.py --stream --slug ARPEGZW3fK --ep 1 --provider megg --lang dub
+
+# EVERYTHING the episode offers (all servers x sub/dub x softsub/hardsub x quality)
+python3 anikage_scraper.py --all --slug ARPEGZW3fK --ep 1
 ```
+
+`--all` returns every decrypted playable URL, e.g. Neko lists both
+`softsub HD-1` and `hardsub HD-1` (and the dub track) — whichever page shows
+which name, you always get the real stream behind it.
 
 Output:
 
@@ -74,6 +81,7 @@ gunicorn app:app --bind 0.0.0.0:3000
 - `GET /api/search?q=one`
 - `GET /api/anime/<slug>/episodes`
 - `GET /api/anime/<slug>/servers?ep=1`
+- `GET /api/anime/<slug>/streams?ep=1`  (everything: all servers x langs x qualities)
 - `GET /api/anime/<slug>/stream?ep=1&provider=E-Wish&lang=sub`
 - `GET /api/health`
 
