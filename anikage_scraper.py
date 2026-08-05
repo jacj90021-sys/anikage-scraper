@@ -15,7 +15,7 @@ HOW IT WORKS
      GET /api/media/anime/<slug>/episodes/<n>/servers
          -> {"servers":[{id,label,subTypes}], "embeds":[{id,key,label}]}
 
-   "servers" = the site's Servers row (Neko / Megg / Ken / Wave / Koto).
+   "servers" = the site's Servers row (Neko / Ken / Miko / Dib / Wave / Koto).
    "embeds"  = the site's Embeds row (E-Neko / E-Ken / E-Koto / E-Wish). The
    embeds are DISTINCT entries on the site and resolve to different selections
    of the same underlying backends:
@@ -75,7 +75,7 @@ _TOKEN_KEY = b"aproxy2026"
 
 # server id -> display name (matches the site's Servers row)
 _DISPLAY = {"neko": "Neko", "megg": "Megg", "dib": "Dib",
-             "wave": "Wave", "koto": "Koto"}
+             "wave": "Wave", "koto": "Koto", "ken": "Ken"}
 
 # embed id -> (backend provider, source type filter, embed-host filter)
 # The embeds are the site's Embeds row; each maps to a DISTINCT source pick.
@@ -395,6 +395,8 @@ def _normalize(servers, embeds, provider):
     if not provider:
         return None
     p = str(provider)
+    if p.lower() == "ken":
+        return ("Ken", "neko", "hardsub", None)
     for s in servers:
         if p in (s["provider"], s["name"]) or p.lower() in (s["name"] or "").lower():
             return (s["name"], s["provider"], None, None)
@@ -447,13 +449,20 @@ def list_servers(slug, ep, lang="sub"):
                 embeds.append(f.result())
             except Exception:
                 pass
+    ken_srcs = _filter_sources(_provider_sources(slug, ep, "neko", want),
+                                "hardsub", None)
+    servers.append({"provider": "ken",
+                     "name": "Ken",
+                     "label": "Koe no Katachi",
+                     "subTypes": ["sub"],
+                     "qualities": [x["quality"] for x in ken_srcs]})
     return {"slug": slug, "episode": int(ep) if str(ep).isdigit() else ep,
             "lang": want, "servers": servers, "embeds": embeds}
 
 
 def resolve_stream(slug, ep, provider=None, lang="sub", quality=None):
     """Resolve ONE playable stream for slug/ep. `provider` may be a server id
-    (neko/megg/dib/wave/koto), a display name (Ken, Wave, ...), or an embed
+    (neko/megg/dib/wave/koto/ken), a display name (Ken, Wave, ...), or an embed
     label (E-Neko, E-Ken, E-Koto, E-Wish). `quality` picks a specific source
     from the provider's quality menu for the requested lang."""
     wanted = "dub" if lang == "dub" else "sub"
@@ -461,6 +470,7 @@ def resolve_stream(slug, ep, provider=None, lang="sub", quality=None):
     servers = [{"provider": s.get("id"),
                 "name": _DISPLAY.get(s.get("id"), (s.get("id") or "").title())}
                for s in d.get("servers", []) or []]
+    servers.append({"provider": "ken", "name": "Ken"})
     embeds = [{"provider": e.get("label") or e.get("id"),
                "name": e.get("label") or e.get("id"),
                "backend": e.get("id")}
@@ -503,9 +513,13 @@ def list_streams(slug, ep, langs=("sub", "dub")):
     for s in info["servers"]:
         entry = {"provider": s["provider"], "name": s["name"],
                  "subTypes": s["subTypes"], "sources": []}
+        backend = "neko" if s["provider"] == "ken" else s["provider"]
         for lang in langs:
             want = "dub" if lang == "dub" else "sub"
-            for x in _provider_sources(slug, ep, s["provider"], want):
+            srcs = _provider_sources(slug, ep, backend, want)
+            if s["provider"] == "ken":
+                srcs = _filter_sources(srcs, "hardsub", None)
+            for x in srcs:
                 entry["sources"].append({"lang": lang, **x})
         out["servers"].append(entry)
     for e in info["embeds"]:
