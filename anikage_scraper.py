@@ -288,26 +288,6 @@ def _filter_sources(srcs, want_type, host_substr):
     return srcs
 
 
-def _player_options(srcs):
-    """Real player-level options for a server/embed.
-
-    anikage's 'HD-1/HD-2' source labels are MIRROR hosts (vivibebe.site vs
-    bibiemb.xyz), NOT player options - the site plays the primary mirror and
-    the player's own quality menu is the m3u8 variant list (360p/720p/1080p).
-    Only genuinely multi-option servers are exposed:
-    - mp4 file servers (Megg: 1080p / 720p / 480p)
-    - megaplay / vidtube multi-source players (Koto: HD-1 auto / VidPlay-1 auto)
-    """
-    opts = []
-    for x in srcs:
-        eu = x.get("embed_url") or ""
-        if x.get("format") == "mp4":
-            opts.append(x["quality"])
-        elif "megaplay" in eu or "vidtube" in eu:
-            opts.append(x["quality"])
-    return _unique(o for o in opts if o)
-
-
 def _result(slug, ep, wanted, display, backend, pick):
     res = {"slug": slug, "episode": ep, "lang": wanted,
            "provider": display,
@@ -382,8 +362,8 @@ def list_servers(slug, ep, lang="sub"):
                 "name": _DISPLAY.get(sid, (sid or "").title()),
                 "label": s.get("label"),
                 "subTypes": s.get("subTypes") or ["sub"],
-                "qualities": _player_options(
-                    _provider_sources(slug, ep, sid, want))}
+                "qualities": _unique(x["quality"] for x in
+                                _provider_sources(slug, ep, sid, want))}
 
     def embed_entry(e):
         eid = e.get("id")
@@ -393,7 +373,7 @@ def list_servers(slug, ep, lang="sub"):
         return {"provider": e.get("label") or eid,
                 "name": e.get("label") or eid,
                 "backend": eid,
-                "qualities": _player_options(srcs)}
+                "qualities": _unique(x["quality"] for x in srcs)}
 
     s_list = d.get("servers", []) or []
     e_list = d.get("embeds", []) or []
