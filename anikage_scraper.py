@@ -294,19 +294,34 @@ def _provider_sources(slug, ep, backend, lang):
 
 
 def megaplay_extras(embed_url):
-    """Optional: megaplay getSources -> subtitle track + intro/outro.
-    The file id is the data-id on the embed page (not the s-<n>/<realid>/ path
-    number). Non-fatal if the player host is unreachable."""
+    """Optional: megaplay getSources -> subtitle tracks + intro/outro.
+
+    The getSources endpoint keys on the jwplayer numeric media id, which the
+    embed page exposes as `data-mediaid` (e.g. <div data-mediaid="44">). The
+    megaplay-hosted players (koto HD-1) AND the vidtube players (koto VidPlay /
+    E-Wish) both serve their subtitle `tracks` from the SAME megaplay getSources
+    API - the only difference is the id source:
+      - megaplay page: data-mediaid OR data-realid (s-<n>/<realid>)
+      - vidtube page: data-mediaid (the URL slug like T0Zw... does NOT work)
+
+    So we extract, in order: data-mediaid -> data-realid -> url slug.
+    Returns a dict with 'subtitles' (list of {file,label}), 'subtitle' /
+    'subtitle_label' (the English/default track), and intro/outro hints.
+    Non-fatal if the player host is unreachable."""
     file_id = None
     try:
         page = _get(embed_url, referer=embed_url)
-        m = re.search(r'data-id="(\d+)"', page)
+        m = re.search(r'data-mediaid="(\d+)"', page)
         if m:
             file_id = m.group(1)
+        if not file_id:
+            m = re.search(r'data-realid="([^"]+)"', page)
+            if m:
+                file_id = m.group(1)
     except Exception:
         pass
     if not file_id:
-        m = re.search(r"/stream/s-\d+/(\d+)", embed_url)
+        m = re.search(r"/stream/s-\d+/([^/?#]+)", embed_url)
         file_id = m.group(1) if m else None
     if not file_id:
         return {}
@@ -321,9 +336,15 @@ def megaplay_extras(embed_url):
             d = json.loads(r.read().decode("utf-8", "ignore"))
         out = {}
         tr = (d.get("tracks") or [])
-        if tr and tr[0].get("file"):
-            out["subtitle"] = tr[0]["file"]
-            out["subtitle_label"] = tr[0].get("label")
+        subs = [{"file": t["file"], "label": t.get("label") or t.get("name")}
+                for t in tr if t.get("file")]
+        if subs:
+            out["subtitles"] = subs
+            # Prefer the track flagged default, else English, else first.
+            default = next((s for s in subs if "eng" in (s["label"] or "").lower()), None)
+            chosen = default or subs[0]
+            out["subtitle"] = chosen["file"]
+            out["subtitle_label"] = chosen["label"]
         if d.get("intro"):
             out["intro"] = d["intro"]
         if d.get("outro"):
@@ -355,8 +376,17 @@ def _result(slug, ep, wanted, display, backend, pick):
            "referer": pick["referer"],
            "embed_url": pick["embed_url"]}
     eu = pick.get("embed_url") or ""
-    if backend == "koto" and "megaplay" in eu:
-        res.update(megaplay_extras(eu))
+    # The only working subtitle path is the megaplay/jwplayer getSources API. BOTH
+    # the megaplay-hosted koto entries (megap.* / akirax.buzz / shiora.site) AND the
+    # vidtube-hosted entries (koto VidPlay / E-Wish, e.g. vidtube.site/...) expose a
+    # numeric `data-mediaid` on their embed page, and getSources?id=<mediaid> returns
+    # that entry's `tracks` (.vtt). So scrape extras for ANY koto backend entry -
+    # megaplay_extras() picks the right id (data-mediaid -> data-realid -> url slug).
+    if backend == "koto":
+        extras = megaplay_extras(eu)
+        res.update(extras)
+        if extras.get("subtitles"):
+            res["subtitles"] = extras["subtitles"]
     else:
         p = urllib.parse.parse_qs(urllib.parse.urlsplit(eu).query)
         if p.get("sub"):
