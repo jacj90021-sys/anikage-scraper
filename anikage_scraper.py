@@ -4,7 +4,8 @@ anikage.cc scraper  (corrected, verified resolver)
 ==================================================
 
 Reverse-engineered from the LIVE anikage site (verified 2026-08 against
-https://anikage.cc/anime/watch/ARPEGZW3fK?ep=1 and others).
+https://anikage.cc/anime/watch/ARPEGZW3fK?ep=1 and Witch Hat Atelier
+5irZy5W2tW).
 
 HOW IT WORKS
 ------------
@@ -14,33 +15,43 @@ HOW IT WORKS
      GET /api/media/anime/<slug>/episodes/<n>/servers
          -> {"servers":[{id,label,subTypes}], "embeds":[{id,key,label}]}
 
+   "servers" = the site's Servers row (Neko / Megg / Ken / Wave / Koto).
+   "embeds"  = the site's Embeds row (E-Neko / E-Ken / E-Koto / E-Wish). The
+   embeds are DISTINCT entries on the site and resolve to different selections
+   of the same underlying backends:
+     E-Neko -> neko backend, softsub sources
+     E-Ken  -> neko backend, hardsub sources
+     E-Koto -> koto backend, megaplay sources (HD-1)
+     E-Wish -> koto backend, vidtube sources (VidPlay-1)
+
 2) Stream resolution:
      GET /api/media/anime/<slug>/episodes/<n>/sources?provider=<id>&lang=<sub|dub>
-         -> {"sources":[{url,isM3U8,embedUrl,quality,type}], "embeds":[{...}], ...}
+         -> {"sources":[{url,isM3U8,embedUrl,quality,type}], "embeds":[...] }
    Every source url is base64( XOR with repeating key b"aproxy2026" ).
    Decrypting it yields the REAL upstream URL directly (no prox relay, no
-   embed-page scraping). The same decrypt resolves every provider:
+   embed-page scraping). Each provider exposes MULTIPLE sources = the site's
+   quality menu (Softsub HD-1, Hardsub HD-2, Dub HD-1, 1080p/720p/480p,
+   SR auto, Vidplay auto, HD-1 auto, VidPlay-1 auto).
 
-       neko -> https://vivibebe.site/public/stream/<hash>/master.m3u8   (hls)
-       ken  -> https://vivibebe.site/public/stream/<hash>/master.m3u8   (hls, hardsub)
-       megg -> https://s<nnn>.vidcache.net:<port>/play/<token>/video.mp4 (mp4)
-       wave -> https://<cdn>.echovideo.to/cdn/<token>?t.m3u8             (hls)
-       koto -> https://megap.<cdn>/<token>/<hash>/master.m3u8            (hls)
-       dib  -> https://playeng.animeapps.top/...                         (hls)
+   Every CDN host enforces a Referer and they are NOT the same for all hosts.
+   The correct referer is derived from the EMBED URL origin (the player page):
+     neko    vivibebe.site / bibiemb.xyz       -> that host
+     ken/dib playeng.animeapps.top             -> that host
+     wave    echovideo cdn host                -> https://play.echovideo.ru/
+     koto    megap.<cdn>/.../master.m3u8       -> https://megaplay.buzz/
+     koto    vidtub.<cdn>/.../master.m3u8      -> https://vidtube.site/
+     megg    vidcache.net:<port>/...mp4        -> https://vidcache.net/
 
-   Note: a token sometimes carries TWO urls (primary + fallback); the
-   primary (first) is used.
-
-3) koto / wish (megaplay) extras: for these we also call the megaplay player
-   endpoint to get the subtitle track and intro/outro skip times:
+3) koto / wish (megaplay) extras: subtitle track + intro/outro via
      GET https://megaplay.buzz/stream/getSources?id=<file_id>&h=0&m=0&type=sub
-     (needs Referer + Origin = https://megaplay.buzz). The <file_id> is the
-     data-id attribute on the embed page (megaplay.buzz/stream/s-<n>/<realid>/<type>)
-     -- NOT the s-<n>/<realid> path number.
+   (needs Referer + Origin = https://megaplay.buzz). The <file_id> is the
+   data-id attribute on the embed page (megaplay.buzz/stream/s-<n>/<realid>/<type>).
+   neko softsub/dub attach their VTT subtitle via the `sub=` query param on the
+   embed url instead (https://cdn.anizara.store/.../....vtt, open to any UA).
 
 OUTPUT of resolve_stream:
-  {slug, episode, lang, provider, url, referer, format, quality, title,
-   subtitle, intro, outro, embed_url}
+  {slug, episode, lang, provider, quality, type, url, referer, format,
+   subtitle, subtitle_label, intro, outro, embed_url}
 """
 
 import argparse
@@ -51,6 +62,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 BASE = "https://anikage.cc"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -62,15 +74,15 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 _TOKEN_KEY = b"aproxy2026"
 
 # server id -> display name (matches the site's Servers row)
-_DISPLAY = {"neko": "Neko", "ken": "Ken", "megg": "Megg",
-            "wave": "Wave", "koto": "Koto", "dib": "Ken"}
+_DISPLAY = {"neko": "Neko", "megg": "Megg", "dib": "Ken",
+            "wave": "Wave", "koto": "Koto"}
 
-# embed key -> backend provider it resolves to.
-# Both softsub and hardsub embeds are the "neko" backend; the key only selects
-# which source type (softsub/hardsub) is returned. (Player map Je: neko=softsub,
-# ken=hardsub, both backend "neko".)
-_EMBED_BACKEND = {"softsub": "neko", "hardsub": "neko",
-                  "koto": "koto", "wish": "koto"}
+# embed id -> (backend provider, source type filter, embed-host filter)
+# The embeds are the site's Embeds row; each maps to a DISTINCT source pick.
+_EMBED_BACKEND = {"softsub": ("neko", "softsub", None),
+                  "hardsub": ("neko", "hardsub", None),
+                  "koto": ("koto", None, "megaplay"),
+                  "wish": ("koto", None, "vidtube")}
 
 _CACHE = {}
 
@@ -143,28 +155,6 @@ def fetch_sources(slug, ep, provider, lang="sub"):
                 referer=f"{BASE}/anime/watch/{slug}")
 
 
-def list_servers(slug, ep):
-    """Full server list, named exactly like the site:
-    Servers: Neko, Ken, Megg, Wave, Koto - Embeds: E-Neko, E-Ken, E-Koto, E-Wish."""
-    d = fetch_servers(slug, ep)
-    out = {"slug": slug, "episode": ep, "servers": [], "embeds": []}
-    for s in d.get("servers", []) or []:
-        out["servers"].append({
-            "id": s.get("id"),
-            "name": _DISPLAY.get(s.get("id"), (s.get("id") or "").title()),
-            "label": s.get("label"),
-            "subTypes": s.get("subTypes") or ["sub"],
-        })
-    for e in d.get("embeds", []) or []:
-        eid = e.get("id")
-        out["embeds"].append({
-            "id": eid,
-            "label": e.get("label") or eid,
-            "backend": _EMBED_BACKEND.get(eid, eid),
-        })
-    return out
-
-
 # ---------- stream resolution ----------
 
 def decrypt_token(tok):
@@ -184,17 +174,66 @@ def decrypt_token(tok):
     return urls[0]
 
 
-def _pick_source(d, wanted_type=None):
-    """Best source from a sources response. Prefers the default/first entry
-    (highest quality), optionally filtered by type (sub/softsub/hardsub)."""
-    srcs = d.get("sources", []) or []
-    if not srcs:
+def _clean_quality(q):
+    """'softsub HD-1' -> 'Softsub HD-1' (the site's display form)."""
+    if not q:
         return None
-    if wanted_type:
-        for s in srcs:
-            if s.get("type") == wanted_type:
-                return s
-    return srcs[0]
+    s = str(q).strip()
+    return s[0].upper() + s[1:] if s else None
+
+
+def _referer_for(url, embed_url=None):
+    """The CDN referer is the PLAYER page origin, not the CDN host."""
+    if embed_url:
+        u = urllib.parse.urlsplit(embed_url)
+        if u.netloc:
+            return f"{u.scheme}://{u.netloc}/"
+    u = urllib.parse.urlsplit(url)
+    host = (u.netloc or "").lower()
+    if "vidcache" in host:
+        return "https://vidcache.net/"
+    if host.startswith("megap."):
+        return "https://megaplay.buzz/"
+    if host.startswith("vidtub"):
+        return "https://vidtube.site/"
+    if "echovideo" in host:
+        return "https://play.echovideo.ru/"
+    return f"{u.scheme}://{u.netloc}/"
+
+
+def _unique(seq):
+    seen, out = set(), []
+    for x in seq:
+        if x in seen:
+            continue
+        seen.add(x)
+        out.append(x)
+    return out
+
+
+def _provider_sources(slug, ep, backend, lang):
+    """All decrypted sources for one backend provider + audio lang, each with
+    its real referer. Deduped by (quality, embed_url)."""
+    d = fetch_sources(slug, ep, backend, lang)
+    out, seen = [], set()
+    for s in d.get("sources", []) or []:
+        real = decrypt_token(s.get("url"))
+        if not real:
+            continue
+        q = _clean_quality(s.get("quality"))
+        key = (q, s.get("embedUrl") or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            "quality": q,
+            "type": s.get("type"),
+            "format": "mp4" if not s.get("isM3U8") else "hls",
+            "url": real,
+            "referer": _referer_for(real, s.get("embedUrl")),
+            "embed_url": s.get("embedUrl"),
+        })
+    return out
 
 
 def megaplay_extras(embed_url):
@@ -237,159 +276,192 @@ def megaplay_extras(embed_url):
         return {}
 
 
-def list_streams(slug, ep, langs=("sub", "dub")):
-    """EVERYTHING an episode offers: every server x every audio lang x every
-    source type/quality, all decrypted to real playable URLs. No picking a
-    single default stream."""
-    servers = list_servers(slug, ep)
-    out = {"slug": slug, "episode": ep, "servers": [], "embeds": []}
-
-    for s in servers["servers"]:
-        sub_types = s.get("subTypes") or ["sub"]
-        entry = {"id": s["id"], "name": s["name"], "subTypes": sub_types,
-                 "sources": []}
-        seen_urls = set()
-        for lang in langs:
-            if lang not in sub_types:
-                continue
-            try:
-                d = fetch_sources(slug, ep, s["id"], lang)
-            except Exception as ex:
-                entry["sources"].append({"lang": lang, "error": str(ex)})
-                continue
-            for src in d.get("sources", []) or []:
-                real = decrypt_token(src.get("url"))
-                if not real:
-                    continue
-                if real in seen_urls:
-                    continue
-                seen_urls.add(real)
-                entry["sources"].append({
-                    "lang": lang,
-                    "type": src.get("type"),
-                    "quality": src.get("quality"),
-                    "format": "mp4" if not src.get("isM3U8") else "hls",
-                    "url": real,
-                    "referer": f"{urllib.parse.urlsplit(real).scheme}://"
-                               f"{urllib.parse.urlsplit(real).netloc}/",
-                    "embed_url": src.get("embedUrl"),
-                })
-            time.sleep(0.4)
-        out["servers"].append(entry)
-
-    # Embeds (E-Neko / E-Ken / E-Koto / E-Wish) resolve to the same streams
-    # already listed above (softsub/hardsub/koto). Add them as metadata so a
-    # page that shows only an embed label is still mapped to a real URL.
-    for e in servers["embeds"]:
-        want_type = e["id"] if e["backend"] == "neko" else None
-        try:
-            d = fetch_sources(slug, ep, e["backend"], "sub")
-            src = _pick_source(d, wanted_type=want_type)
-        except Exception:
-            src = None
-        real = decrypt_token((src or {}).get("url")) if src else None
-        out["embeds"].append({
-            "id": e["id"],
-            "label": e["label"],
-            "backend": e["backend"],
-            "type": want_type or "default",
-            "url": real,
-        })
-        time.sleep(0.4)
-
-    return out
+def _filter_sources(srcs, want_type, host_substr):
+    if want_type:
+        typed = [x for x in srcs if x["type"] == want_type]
+        if typed:
+            srcs = typed
+    if host_substr:
+        hostm = [x for x in srcs if host_substr in (x["embed_url"] or "")]
+        if hostm:
+            srcs = hostm
+    return srcs
 
 
-def resolve_stream(slug, ep, provider=None, lang="sub"):
-    """Resolve a playable stream for slug/ep. `provider` may be a server id
-    (neko/ken/megg/wave/koto/dib) or a display name (E-Neko, E-Ken, ...)."""
-    wanted = "dub" if lang == "dub" else "sub"
-    servers = list_servers(slug, ep)
-    providers = servers["servers"]
-    embeds = servers["embeds"]
+def _result(slug, ep, wanted, display, backend, pick):
+    res = {"slug": slug, "episode": ep, "lang": wanted,
+           "provider": display,
+           "quality": pick["quality"],
+           "type": pick["type"],
+           "url": pick["url"],
+           "format": pick["format"],
+           "referer": pick["referer"],
+           "embed_url": pick["embed_url"]}
+    eu = pick.get("embed_url") or ""
+    if backend == "koto" and "megaplay" in eu:
+        res.update(megaplay_extras(eu))
+    else:
+        p = urllib.parse.parse_qs(urllib.parse.urlsplit(eu).query)
+        if p.get("sub"):
+            res["subtitle"] = p["sub"][0]
+            res["subtitle_label"] = "English"
+    return res
 
-    if not providers and not embeds:
-        return {"slug": slug, "episode": ep, "error": "no servers for this episode"}
 
-    # Build the ordered list of (label, backend_provider, kind, key) to try.
-    plan = []
-    for s in providers:
-        sub_types = s.get("subTypes") or []
-        if wanted == "dub" and "dub" not in sub_types:
-            continue
-        plan.append((s["name"], s["id"], "provider", None))
+def _emit(slug, ep, wanted, display, backend, want_type, host_substr,
+          srcs, quality):
+    srcs = _filter_sources(srcs, want_type, host_substr)
+    if not srcs:
+        return {"slug": slug, "episode": ep,
+                "error": f"{display}: no {wanted} sources"}
+    if quality:
+        for x in srcs:
+            if (x.get("quality") or "").lower() == quality.lower():
+                return _result(slug, ep, wanted, display, backend, x)
+        for x in srcs:
+            if quality.lower() in (x.get("quality") or "").lower():
+                return _result(slug, ep, wanted, display, backend, x)
+        avail = [x["quality"] for x in srcs if x.get("quality")]
+        return {"slug": slug, "episode": ep,
+                "error": f"quality '{quality}' not available for {display} "
+                         f"({wanted}); options: {', '.join(avail)}"}
+    if backend == "neko" and wanted != "dub" and want_type is None:
+        soft = [x for x in srcs if x["type"] == "softsub"]
+        if soft:
+            return _result(slug, ep, wanted, display, backend, soft[0])
+    return _result(slug, ep, wanted, display, backend, srcs[0])
+
+
+def _normalize(servers, embeds, provider):
+    """Match a provider token (server id, display name, embed id, embed label)
+    to (display_name, backend, want_type, host_substr)."""
+    if not provider:
+        return None
+    p = str(provider)
+    for s in servers:
+        if p in (s["provider"], s["name"]) or p.lower() in (s["name"] or "").lower():
+            return (s["name"], s["provider"], None, None)
     for e in embeds:
-        plan.append((e["label"], e["backend"], "embed", e["id"]))
+        if p in (e["provider"], e["name"]) or p.lower() in (e["name"] or "").lower():
+            backend, wtype, host = _EMBED_BACKEND.get(e["backend"], (e["backend"], None, None))
+            return (e["name"], backend, wtype, host)
+    return None
 
-    # Reorder: requested provider first.
+
+def list_servers(slug, ep, lang="sub"):
+    """The site's full server+embed rows, each with the real quality labels for
+    the requested audio lang. All 5 servers and all 4 embeds are always listed
+    (Ken shows even though it is hardsub/SR-only) - exactly like the site."""
+    want = "dub" if lang == "dub" else "sub"
+    d = fetch_servers(slug, ep)
+    servers, embeds = [], []
+
+    def server_entry(s):
+        sid = s.get("id")
+        return {"provider": sid,
+                "name": _DISPLAY.get(sid, (sid or "").title()),
+                "label": s.get("label"),
+                "subTypes": s.get("subTypes") or ["sub"],
+                "qualities": _unique(x["quality"] for x in
+                                _provider_sources(slug, ep, sid, want))}
+
+    def embed_entry(e):
+        eid = e.get("id")
+        backend, wtype, host = _EMBED_BACKEND.get(eid, (eid, None, None))
+        srcs = _filter_sources(_provider_sources(slug, ep, backend, want),
+                               wtype, host)
+        return {"provider": e.get("label") or eid,
+                "name": e.get("label") or eid,
+                "backend": eid,
+                "qualities": _unique(x["quality"] for x in srcs)}
+
+    s_list = d.get("servers", []) or []
+    e_list = d.get("embeds", []) or []
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        s_futs = [ex.submit(server_entry, s) for s in s_list]
+        e_futs = [ex.submit(embed_entry, e) for e in e_list]
+        for f in s_futs:
+            try:
+                servers.append(f.result())
+            except Exception:
+                pass
+        for f in e_futs:
+            try:
+                embeds.append(f.result())
+            except Exception:
+                pass
+    return {"slug": slug, "episode": int(ep) if str(ep).isdigit() else ep,
+            "lang": want, "servers": servers, "embeds": embeds}
+
+
+def resolve_stream(slug, ep, provider=None, lang="sub", quality=None):
+    """Resolve ONE playable stream for slug/ep. `provider` may be a server id
+    (neko/megg/dib/wave/koto), a display name (Ken, Wave, ...), or an embed
+    label (E-Neko, E-Ken, E-Koto, E-Wish). `quality` picks a specific source
+    from the provider's quality menu for the requested lang."""
+    wanted = "dub" if lang == "dub" else "sub"
+    d = fetch_servers(slug, ep)
+    servers = [{"provider": s.get("id"),
+                "name": _DISPLAY.get(s.get("id"), (s.get("id") or "").title())}
+               for s in d.get("servers", []) or []]
+    embeds = [{"provider": e.get("label") or e.get("id"),
+               "name": e.get("label") or e.get("id"),
+               "backend": e.get("id")}
+              for e in d.get("embeds", []) or []]
+
     if provider:
-        hit = [p for p in plan
-               if provider in (p[1], p[0]) or provider.lower() in p[0].lower()]
-        plan = hit + [p for p in plan if p not in hit]
-        if not hit:
+        norm = _normalize(servers, embeds, provider)
+        if not norm:
             return {"slug": slug, "episode": ep,
                     "error": f"unknown server: {provider}"}
+        display, backend, wtype, host = norm
+        srcs = _provider_sources(slug, ep, backend, wanted)
+        return _emit(slug, ep, wanted, display, backend, wtype, host,
+                     srcs, quality)
 
-    errors = []
-    for label, backend, kind, key in plan:
-        try:
-            d = fetch_sources(slug, ep, backend, wanted)
-        except Exception as ex:
-            errors.append(f"{label}: sources failed ({ex})")
-            continue
+    # default (no provider): first server that yields a stream, then embeds.
+    for s in servers:
+        srcs = _provider_sources(slug, ep, s["provider"], wanted)
+        res = _emit(slug, ep, wanted, s["name"], s["provider"], None, None,
+                    srcs, None)
+        if res and "error" not in res:
+            return res
+    for e in embeds:
+        backend, wtype, host = _EMBED_BACKEND.get(e["backend"], (e["backend"], None, None))
+        srcs = _provider_sources(slug, ep, backend, wanted)
+        res = _emit(slug, ep, wanted, e["name"], backend, wtype, host,
+                    srcs, None)
+        if res and "error" not in res:
+            return res
 
-        # --- primary path: decrypt the encrypted source url ---
-        want_type = key if kind == "embed" else None
-        if want_type is None and backend == "neko" and wanted == "sub":
-            want_type = "softsub"          # Neko's default is softsub
-        src = _pick_source(d, wanted_type=want_type)
-        if src and src.get("url"):
-            real = decrypt_token(src["url"])
-            if real:
-                res = {
-                    "slug": slug,
-                    "episode": ep,
-                    "lang": wanted,
-                    "provider": label,
-                    "quality": src.get("quality"),
-                    "url": real,
-                    "format": "mp4" if not src.get("isM3U8") else "hls",
-                    "referer": f"{urllib.parse.urlsplit(real).scheme}://"
-                               f"{urllib.parse.urlsplit(real).netloc}/",
-                    "embed_url": src.get("embedUrl"),
-                }
-                # koto/wish -> try to attach subtitle + intro/outro
-                if backend in ("koto",) and src.get("embedUrl"):
-                    res.update(megaplay_extras(src["embedUrl"]))
-                return res
-            errors.append(f"{label}: token decrypt failed")
-            continue
+    return {"slug": slug, "episode": ep, "error": "no server yielded a stream"}
 
-        # --- fallback: walk the source / embed urls looking for a decryptable hls ---
-        emb_list = d.get("embeds", []) or []
-        candidates = [s for s in d.get("sources", []) if s.get("embedUrl")]
-        candidates += [e for e in emb_list if e.get("url")]
-        for cand in candidates:
-            u = cand.get("url") or cand.get("embedUrl")
-            if not u:
-                continue
-            real = decrypt_token(u)
-            if real:
-                return {"slug": slug, "episode": ep, "lang": wanted,
-                        "provider": label, "quality": cand.get("quality"),
-                        "url": real, "format": "hls",
-                        "referer": f"{urllib.parse.urlsplit(real).scheme}://"
-                                   f"{urllib.parse.urlsplit(real).netloc}/",
-                        "embed_url": cand.get("embedUrl") or cand.get("url")}
-            errors.append(f"{label}: no decryptable stream")
-            break
-        else:
-            errors.append(f"{label}: no stream entries")
-        # rate-limit courtesy between providers
-        time.sleep(0.3)
 
-    return {"slug": slug, "episode": ep, "error": "; ".join(errors)
-            or "no server yielded a stream"}
+def list_streams(slug, ep, langs=("sub", "dub")):
+    """EVERYTHING an episode offers: every server/embed x every audio lang x
+    every source/quality, all decrypted to real playable URLs + referers."""
+    info = list_servers(slug, ep, langs[0])
+    out = {"slug": slug, "episode": int(ep) if str(ep).isdigit() else ep,
+           "servers": [], "embeds": []}
+    for s in info["servers"]:
+        entry = {"provider": s["provider"], "name": s["name"],
+                 "subTypes": s["subTypes"], "sources": []}
+        for lang in langs:
+            want = "dub" if lang == "dub" else "sub"
+            for x in _provider_sources(slug, ep, s["provider"], want):
+                entry["sources"].append({"lang": lang, **x})
+        out["servers"].append(entry)
+    for e in info["embeds"]:
+        backend, wtype, host = _EMBED_BACKEND.get(e["backend"], (e["backend"], None, None))
+        entry = {"provider": e["provider"], "name": e["name"], "sources": []}
+        for lang in langs:
+            want = "dub" if lang == "dub" else "sub"
+            srcs = _filter_sources(_provider_sources(slug, ep, backend, want),
+                                   wtype, host)
+            for x in srcs:
+                entry["sources"].append({"lang": lang, **x})
+        out["embeds"].append(entry)
+    return out
 
 
 def main():
@@ -404,6 +476,7 @@ def main():
                     help="dump EVERY stream (all servers x sub/dub x qualities)")
     ap.add_argument("--ep", default="1")
     ap.add_argument("--provider")
+    ap.add_argument("--quality")
     ap.add_argument("--lang", default="sub", choices=["sub", "dub"])
     ap.add_argument("--out", default="anikage_index")
     args = ap.parse_args()
@@ -421,7 +494,8 @@ def main():
             print("ERROR: --slug required for --stream", file=sys.stderr)
             sys.exit(1)
         print(json.dumps(resolve_stream(args.slug, args.ep,
-                                        args.provider, args.lang),
+                                        args.provider, args.lang,
+                                        args.quality),
                          indent=2, ensure_ascii=False))
         return
 

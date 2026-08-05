@@ -53,8 +53,9 @@ def episodes(slug):
 @app.get("/api/anime/<slug>/servers")
 def servers(slug):
     ep = request.args.get("ep", "1")
+    lang = request.args.get("lang", "sub")
     try:
-        return jsonify(list_servers(slug, ep))
+        return jsonify(list_servers(slug, ep, lang))
     except Exception as ex:
         return jsonify({"error": str(ex)}), 502
 
@@ -73,8 +74,9 @@ def stream(slug):
     ep = request.args.get("ep", "1")
     provider = request.args.get("provider")
     lang = request.args.get("lang", "sub")
+    quality = request.args.get("quality")
     try:
-        return jsonify(resolve_stream(slug, ep, provider, lang))
+        return jsonify(resolve_stream(slug, ep, provider, lang, quality))
     except Exception as ex:
         return jsonify({"error": str(ex)}), 502
 
