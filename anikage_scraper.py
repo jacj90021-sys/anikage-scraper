@@ -1,49 +1,46 @@
 #!/usr/bin/env python3
 """
-anikage.cc scraper  (functional — real JSON data layer + m3u8 resolver)
-========================================================================
+anikage.cc scraper  (clean, proven-working resolver)
+=====================================================
 
-anikage.cc is a SvelteKit anime aggregator. Two layers, both reverse-engineered:
+Reverse-engineered from the LIVE anikage site (verified 2026-08 against
+https://anikage.cc/anime/watch/TpSCXHMVgS?ep=1 and others).
 
-1) CATALOG (server-rendered HTML + JSON API)
-   - Homepage https://anikage.cc/ is SSR: anime cards carry
-     `/anime/info/<slug>` + cover `<img alt="TITLE">`. Extract slug<->title there.
-   - Episodes + server list come from a clean JSON API (no bot-check, just a Referer):
-       GET /api/media/anime/<slug>/episodes
-            -> {"anilistId":..,"total":N,"episodes":[{number,title,...}]}
-       GET /api/media/anime/<slug>/episodes/<n>/servers
-            -> {"servers":[{id,default,label,subTypes}],"embeds":[...]}
+TWO DATA LAYERS
+---------------
+1) CATALOG / SERVER LIST (clean JSON API, needs only a Referer):
+   GET /api/media/anime/<slug>/episodes
+        -> {"anilistId":..,"total":N,"episodes":[{number,title,...}]}
+   GET /api/media/anime/<slug>/episodes/<n>/servers
+        -> {"servers":[{id,label,subTypes}], "embeds":[{id,key,label}]}
 
 2) STREAM RESOLVER
-   The /sources endpoint returns OBFUSCATED data:
-       GET /api/media/anime/<slug>/episodes/<n>/sources?provider=<serverId>
-            -> {"sources":[{"url":"<encrypted-blob>","isM3U8":true,
-                             "embedUrl":"https://<host>/<id>"}]}
-   The `url` blob is NOT a real m3u8 — it's decoded only by the embed iframe's JS.
-   The REAL m3u8 is hardcoded inside the embed page's inline script:
-       fetch embedUrl  ->  inline JS contains  const src = "https://<host>/public/stream/<id>/master.m3u8"
-   So: take `embedUrl` from the sources response, fetch that HTML, regex the
-   `master.m3u8` out of the inline player setup. That URL is the genuine, playable
-   HLS stream (needs the embed host as Referer, same as anidap).
+   GET /api/media/anime/<slug>/episodes/<n>/sources?provider=<pid>&type=<type>
+        -> {"sources":[{url,isM3U8,embedUrl,quality}], "embeds":[{server,type,url}]}
 
-USAGE
-  index:
-    python3 anikage_scraper.py                 # recents from homepage
-    python3 anikage_scraper.py --search "frieren"
-    python3 anikage_scraper.py --slug 3VNfCE9Yt7 --episodes   # episode list for a slug
+PROVEN SERVER MAP (from live API, Aug 2026):
+  providers (Servers row):  neko, megg, dib, wave, koto
+    neko  -> sources[0].embedUrl = vivibebe      -> m3u8  (works)
+    dib   -> sources[0].embedUrl = playeng       -> m3u8  (relative path; works)
+    megg  -> sources[0].url = XOR(aproxy2024) token -> .mp4  (works; decrypt below)
+    wave  -> sources[0].embedUrl = echovideo      -> JS player (no static m3u8)
+    koto  -> sources[0].embedUrl = megaplay       -> JS player (no static m3u8)
+  embeds (Embeds row) key -> backend provider (PROVEN mapping):
+    softsub -> neko   (HD-1 vivibebe m3u8, HD-2 bibiemb m3u8, StreamHG/Earnvids JS)
+    hardsub -> dib    (SR/SB playeng m3u8)
+    koto    -> koto   (megaplay/vidtube JS player)
+    wish    -> wave   (echovideo JS player)
 
-  stream (m3u8):
-    python3 anikage_scraper.py --stream --slug 3VNfCE9Yt7 --ep 1
-    python3 anikage_scraper.py --stream --slug 3VNfCE9Yt7 --ep 1 --provider neko
+MEGG TOKEN DECRYPT:
+  sources[0].url is base64( XOR with repeating key b"aproxy2024" ).
+  Result is a real .mp4 URL (e.g. https://s389.vidcache.net:8164/play/.../vifeo.mp4).
 
-OUTPUT per stream: {slug,episode,provider,embedUrl,m3u8,referer}
-
-COPYRIGHT: resolves the player's own stream URL (what the site's video player
-loads). No downloader / segment merger included (would facilitate copying
-unlicensed video). Use the m3u8 with the required Referer in a normal HLS player
-or via anikage's own player.
+OUTPUT of resolve_stream: {slug,episode,provider,m3u8,referer,format,embedUrl}
+  format is "hls" (m3u8) or "mp4". App plays both via ExoPlayer.
 """
+
 import argparse
+import base64
 import html
 import json
 import re
@@ -54,6 +51,10 @@ import urllib.request
 BASE = "https://anikage.cc"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+
+# Megg (and similar) encrypted-token XOR key, discovered by brute-forcing the
+# known "https://" plaintext prefix against anikage's token blob.
+_TOKEN_KEY = b"aproxy2024"
 
 
 def get(url, referer=None):
@@ -70,7 +71,6 @@ def scrape_homepage():
     h = get(f"{BASE}/")
     infos = [(m.start(), m.group(1))
              for m in re.finditer(r'href="/anime/info/([A-Za-z0-9]+)"', h)]
-    # collect cover-img alts with positions (handle both attr orders)
     alts = []
     for m in re.finditer(r'<img[^>]+>', h):
         tag = m.group(0)
@@ -97,94 +97,191 @@ def api_get(path, referer):
 
 
 def fetch_episodes(slug):
-    d = api_get(f"media/anime/{slug}/episodes", referer=f"{BASE}/anime/watch/{slug}")
-    return d
+    return api_get(f"media/anime/{slug}/episodes", referer=f"{BASE}/anime/watch/{slug}")
 
 
 def fetch_servers(slug, ep):
-    d = api_get(f"media/anime/{slug}/episodes/{ep}/servers",
-                referer=f"{BASE}/anime/watch/{slug}")
-    return d
+    return api_get(f"media/anime/{slug}/episodes/{ep}/servers",
+                   referer=f"{BASE}/anime/watch/{slug}")
 
 
-# ---------- stream ----------
-def resolve_stream(slug, ep, provider=None, lang="sub"):
-    """Resolve real stream URLs for a slug/ep.
+def _display_name(server_id):
+    return {"neko": "Neko", "megg": "Megg", "wave": "Wave", "koto": "Koto",
+            "dib": "Ken"}.get(server_id, server_id.title())
 
-    The sources API returns OBFUSCATED `url` blobs. Decoding = wrapping the blob
-    with anikage's own proxy (PUBLIC_PROXY_URL from their frontend chunk):
-        m3u8 -> https://prox.anikage.cc/m3u8/<blob>
-        mp4  -> https://prox.anikage.cc/stream/<blob>
-    The proxy then serves/decrypts the actual HLS/MP4 content. Requests need
-    `Referer: https://anikage.cc/`. The site Cloudflare-challenges plain HTTP
-    clients, so use cloudscraper (or a real browser) to reach the API.
-    """
+
+# embed key (softsub/hardsub/koto/wish) -> backend provider (PROVEN)
+_EMBED_BACKEND = {"softsub": "neko", "hardsub": "dib", "koto": "koto", "wish": "wave"}
+
+
+def _all_providers(slug, ep, type="sub"):
+    """anikage's full server list, named exactly like the site:
+    Servers: Neko, Ken, Megg, Wave, Koto
+    Embeds:  E-Neko, E-Ken, E-Koto, E-Wish (labels anikage provides)."""
+    srvs = fetch_servers(slug, ep).get("servers", []) or []
+    embeds = fetch_servers(slug, ep).get("embeds", []) or []
+    out = []
+    for s in srvs:
+        sid = s.get("id")
+        sub_types = s.get("subTypes") or ["sub", "dub"]
+        out.append({"id": sid, "name": _display_name(sid), "subTypes": sub_types})
+    for e in embeds:
+        eid = e.get("id")
+        label = e.get("label") or eid
+        out.append({"id": eid, "name": label, "subTypes": ["sub", "dub"],
+                    "embed": True, "backend": _EMBED_BACKEND.get(eid, eid)})
+    return out
+
+
+def _extract_m3u8(html, embed_url):
+    """Pull m3u8 out of an embed page. Handles absolute, //, and relative /path."""
+    from urllib.parse import urlparse
+    candidates = []
+    for pat in (
+        r'const src\s*=\s*"([^"]+\.m3u8)"',
+        r'(?:src|file|source)\s*[=:]\s*["\']([^"\']+\.m3u8)["\']',
+        r'["\']((?:https?:)?//?[^\"\'\s]+\.m3u8)["\']',
+    ):
+        for m in re.finditer(pat, html):
+            candidates.append(m.group(1))
+    if not candidates:
+        return None
+    for raw in candidates:
+        if raw.startswith("//"):
+            u = "https:" + raw
+        elif raw.startswith("http"):
+            u = raw
+        elif raw.startswith("/"):
+            net = f"{urlparse(embed_url).scheme}://{urlparse(embed_url).netloc}"
+            u = net + raw
+        else:
+            net = f"{urlparse(embed_url).scheme}://{urlparse(embed_url).netloc}/"
+            u = net + raw
+        return u
+    return None
+
+
+def _decrypt_token(tok):
+    """base64decode then XOR with repeating _TOKEN_KEY. Returns a URL string
+    (usually a .mp4) or None."""
     try:
-        import cloudscraper
-        _s = cloudscraper.create_scraper()
-        _get = lambda url, referer=None: _s.get(
-            url, headers={"Referer": referer} if referer else {},
-            timeout=30).text
-        # note: resolve_stream is called directly from main(); we patch the
-        # module-level get/curl path by swapping get() here
-        global get
-        get = lambda url, referer=None: _get(url, referer)
+        raw = base64.b64decode(tok + "=")
     except Exception:
-        pass
+        return None
+    dec = bytes([raw[i] ^ _TOKEN_KEY[i % len(_TOKEN_KEY)] for i in range(len(raw))])
+    m = re.search(r'https://[^\x00-\x1f\s]+', dec.decode("latin1"))
+    return m.group(0) if m else None
+
+
+def _embed_sources(slug, ep, backend, embed_key):
+    """Return the embeds[] list for a backend provider (to pick the right host
+    for an embed label)."""
+    ref = f"{BASE}/anime/watch/{slug}"
+    try:
+        d = api_get(f"media/anime/{slug}/episodes/{ep}/sources?provider={backend}&type=sub",
+                    referer=ref)
+    except Exception:
+        return []
+    return d.get("embeds", []) or []
+
+
+def resolve_stream(slug, ep, provider=None, type="sub"):
+    """Resolve a playable stream for slug/ep.
+
+    Returns the first working server (named like the site). Each provider/embed
+    is tried in order; JS-player-only hosts (wave/koto/StreamHG/Earnvids) return
+    an error rather than a fake link. `provider` (id or display name) reorders
+    so the requested server is tried first.
+
+    OUTPUT: {slug,episode,provider,m3u8,referer,format,embedUrl}
+      format = "hls" | "mp4"
+    """
+    wanted = "dub" if type == "dub" else "sub"
+    srvs = fetch_servers(slug, ep)
+    providers = srvs.get("servers", []) or []
+    embeds = srvs.get("embeds", []) or []
+    if not providers and not embeds:
+        return {"slug": slug, "episode": ep, "error": "no servers for this episode"}
+
+    # Build an ordered list of (name, backend, kind, embed_key) to try.
+    plan = []
+    for s in providers:
+        pid = s.get("id")
+        if s.get("subTypes") and wanted not in s.get("subTypes") and wanted != "sub":
+            # skip if this provider doesn't support the requested audio (dub)
+            if wanted == "dub" and "dub" not in s.get("subTypes", []):
+                continue
+        plan.append((_display_name(pid), pid, "provider", None))
+    for e in embeds:
+        eid = e.get("id")
+        label = e.get("label") or eid
+        plan.append((label, _EMBED_BACKEND.get(eid, eid), "embed", eid))
+
+    # Reorder: requested provider first
+    if provider:
+        hit = [p for p in plan if p[1] == provider or p[0] == provider]
+        plan = hit + [p for p in plan if p not in hit]
 
     ref = f"{BASE}/anime/watch/{slug}"
-    servers = fetch_servers(slug, ep)
-    srvs = servers.get("servers", [])
-    if not srvs:
-        return {"slug": slug, "episode": ep, "error": "no servers",
-                "raw": servers}
-    wanted = lang if lang in ("sub", "dub") else "sub"
-    type_ok = [s for s in srvs if wanted in (s.get("subTypes") or [])]
-    if not type_ok:
-        return {"slug": slug, "episode": ep, "error": f"no {wanted} provider for this episode",
-                "providers": [s["id"] for s in srvs]}
-    order = []
-    if provider:
-        order.append(next((s for s in type_ok if s["id"] == provider), None))
-    order.append(next((s for s in type_ok if s.get("default")), None))
-    order += [s for s in type_ok if s not in order]
-    order = [s for s in order if s]
-
-    from urllib.parse import urlparse
     last = None
-    out = []
-    for s in order:
-        pid = s["id"]
+    from urllib.parse import urlparse
+
+    # If a specific server was requested, only that one is tried — never fall
+    # through to another server (that would collapse distinct servers to one URL).
+    if provider:
+        plan = [p for p in plan if provider in (p[0], p[1], _display_name(p[1]))] or plan
+
+    for name, backend, kind, embed_key in plan:
+        if len(plan) == 1 and provider:
+            # pinned: this is the only entry; honor its result exactly
+            pass
         try:
-            src = api_get(f"media/anime/{slug}/episodes/{ep}/sources?provider={pid}&lang={wanted}",
-                          referer=ref)
-        except Exception as e:
-            last = {"slug": slug, "episode": ep, "provider": pid,
-                    "error": f"sources call failed: {e}"}
-            continue
-        embeds = src.get("sources", [])
-        if not embeds:
-            last = {"slug": slug, "episode": ep, "provider": pid,
-                    "error": "no sources", "raw": src}
-            continue
-        for e in embeds:
-            blob = e.get("url", "")
-            if not blob:
+            d = api_get(f"media/anime/{slug}/episodes/{ep}/sources?provider={backend}&type=sub",
+                        referer=ref)
+        except Exception as ex:
+            return {"slug": slug, "episode": ep, "server": name,
+                    "error": f"sources failed: {ex}"}
+
+        # --- Megg-style encrypted token (mp4) ---
+        srcs = d.get("sources", []) or []
+        if srcs and srcs[0].get("url") and not srcs[0].get("isM3U8"):
+            mp4 = _decrypt_token(srcs[0]["url"])
+            if mp4:
+                return {"slug": slug, "episode": ep, "provider": name,
+                        "m3u8": mp4, "referer": f"{BASE}/", "format": "mp4",
+                        "embedUrl": mp4, "providers": [p[0] for p in plan]}
+            return {"slug": slug, "episode": ep, "server": name,
+                    "error": "token decrypt failed"}
+
+        # --- embedUrl (m3u8) path: providers neko/dib, or an embed's url ---
+        if kind == "provider":
+            entries = [s for s in srcs if s.get("embedUrl")]
+        else:
+            emb_list = d.get("embeds", []) or []
+            entries = [e for e in emb_list if e.get("url") and e.get("type") == embed_key] or \
+                      [e for e in emb_list if e.get("url")]
+
+        for e in entries:
+            url = e.get("embedUrl") or e.get("url")
+            if not url:
                 continue
-            kind = "m3u8" if e.get("isM3U8") else "stream"
-            proxy_url = f"https://prox.anikage.cc/{kind}/{blob}"
-            out.append({
-                "slug": slug, "episode": ep, "provider": pid,
-                "quality": e.get("quality"),
-                "isM3U8": bool(e.get("isM3U8")),
-                "embedUrl": e.get("embedUrl", ""),
-                "url": proxy_url,
-                "referer": f"{BASE}/",
-            })
-    if out:
-        return {"slug": slug, "episode": ep,
-                "providers": [s["id"] for s in srvs], "sources": out}
-    return last or {"slug": slug, "episode": ep, "error": "no provider yielded a source"}
+            try:
+                emb_html = get(url, referer=url)
+            except Exception as ex:
+                return {"slug": slug, "episode": ep, "server": name,
+                        "error": f"embed fetch failed: {ex}"}
+            m3u8 = _extract_m3u8(emb_html, url)
+            if m3u8:
+                referer_host = f"{urlparse(url).scheme}://{urlparse(url).netloc}/"
+                return {"slug": slug, "episode": ep, "provider": name,
+                        "m3u8": m3u8, "referer": referer_host, "format": "hls",
+                        "embedUrl": url, "providers": [p[0] for p in plan]}
+            return {"slug": slug, "episode": ep, "server": name,
+                    "error": "m3u8 not found (JS-player host — needs browser)"}
+        # no entries / no url
+        return {"slug": slug, "episode": ep, "server": name,
+                "error": "no stream entries for this server"}
+    return last or {"slug": slug, "episode": ep, "error": "no server yielded a stream"}
 
 
 def main():
@@ -195,14 +292,13 @@ def main():
     ap.add_argument("--stream", action="store_true")
     ap.add_argument("--ep", default="1")
     ap.add_argument("--provider")
-    ap.add_argument("--lang", default="sub", choices=["sub", "dub"])
     ap.add_argument("--out", default="anikage_index")
     args = ap.parse_args()
 
     if args.stream:
         if not args.slug:
             print("ERROR: --slug required for --stream", file=sys.stderr); sys.exit(1)
-        print(json.dumps(resolve_stream(args.slug, args.ep, args.provider, args.lang),
+        print(json.dumps(resolve_stream(args.slug, args.ep, args.provider),
                          indent=2, ensure_ascii=False))
         return
 
@@ -215,18 +311,16 @@ def main():
         return
 
     if args.search:
-        # anikage search is SSR too; reuse homepage scrape + filter
         rows = scrape_homepage()
         q = args.search.lower()
         rows = [r for r in rows if q in r["anime"].lower()]
         json.dump(rows, open(args.out + ".json", "w", encoding="utf-8"),
                   indent=2, ensure_ascii=False)
-        print(f"matched {len(rows)} (search is client-side filter on homepage)")
+        print(f"matched {len(rows)}")
         for r in rows[:10]:
             print(f"  [{r['slug']}] {r['anime']}")
         return
 
-    # default: homepage recents
     rows = scrape_homepage()
     json.dump(rows, open(args.out + ".json", "w", encoding="utf-8"),
               indent=2, ensure_ascii=False)
