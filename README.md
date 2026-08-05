@@ -36,6 +36,9 @@ embed page (the `s-<n>/<realid>` path number is **not** the getSources id).
 # search the catalog (live browse API - not a hardcoded list)
 python3 anikage_scraper.py --search "one piece"
 
+# full metadata incl. anilistId (anikage's data source is AniList)
+python3 anikage_scraper.py --info --slug ARPEGZW3fK
+
 # list servers + embeds for an episode
 python3 anikage_scraper.py --stream --slug ARPEGZW3fK --ep 1          # default Neko
 python3 anikage_scraper.py --stream --slug ARPEGZW3fK --ep 1 --provider E-Wish
@@ -79,6 +82,7 @@ gunicorn app:app --bind 0.0.0.0:3000
 ```
 
 - `GET /api/search?q=one`
+- `GET /api/anime/<slug>` (full metadata incl. `anilistId`)
 - `GET /api/anime/<slug>/episodes`
 - `GET /api/anime/<slug>/servers?ep=1`
 - `GET /api/anime/<slug>/streams?ep=1`  (everything: all servers x langs x qualities)

@@ -98,7 +98,8 @@ def _api(path, referer):
 def search_anime(q, limit=25):
     """Find anime by keyword using anikage's real browse/search API
     (GET /api/media/anime/browse?q=..&sort=popularity&page=1&limit=..).
-    NOT a hardcoded list - the catalog is fetched live from the site."""
+    NOT a hardcoded list - the catalog is fetched live from the site.
+    Every result carries anilistId (anikage's metadata source is AniList)."""
     params = {"q": q, "sort": "popularity", "page": 1,
               "limit": limit, "adult": "false"}
     url = f"{BASE}/api/media/anime/browse?" + urllib.parse.urlencode(params)
@@ -108,8 +109,22 @@ def search_anime(q, limit=25):
         t = x.get("title") or {}
         title = (t.get("english") or t.get("romaji")
                  or t.get("native") or x.get("name") or "")
-        out.append({"slug": x.get("slug"), "anime": title})
+        out.append({
+            "slug": x.get("slug"),
+            "anilistId": x.get("anilistId"),
+            "anime": title,
+            "format": x.get("format"),
+            "year": x.get("year"),
+            "status": x.get("status"),
+            "cover": (x.get("coverImage") or {}).get("large"),
+        })
     return out
+
+
+def get_anime_info(slug):
+    """Full metadata for a slug from GET /api/media/anime/<slug>.
+    Includes anilistId / malId - anikage's data comes from AniList."""
+    return _api(f"media/anime/{slug}", referer=f"{BASE}/anime/info/{slug}")
 
 
 def fetch_episodes(slug):
@@ -382,6 +397,8 @@ def main():
     ap.add_argument("--search")
     ap.add_argument("--slug")
     ap.add_argument("--episodes", action="store_true")
+    ap.add_argument("--info", action="store_true",
+                    help="show full metadata (anilistId, images, stats) for --slug")
     ap.add_argument("--stream", action="store_true")
     ap.add_argument("--all", action="store_true",
                     help="dump EVERY stream (all servers x sub/dub x qualities)")
@@ -406,6 +423,32 @@ def main():
         print(json.dumps(resolve_stream(args.slug, args.ep,
                                         args.provider, args.lang),
                          indent=2, ensure_ascii=False))
+        return
+
+    if args.info:
+        if not args.slug:
+            print("ERROR: --slug required for --info", file=sys.stderr)
+            sys.exit(1)
+        info = get_anime_info(args.slug)
+        a = info.get("anime", info)
+        t = a.get("title") or {}
+        print(json.dumps({
+            "slug": a.get("slug"),
+            "anilistId": a.get("anilistId"),
+            "malId": a.get("malId"),
+            "title": t.get("english") or t.get("romaji") or t.get("native"),
+            "native": t.get("native"),
+            "format": a.get("format"),
+            "status": a.get("status"),
+            "year": a.get("year"),
+            "season": a.get("season"),
+            "episodes": a.get("totalEpisodes"),
+            "genres": a.get("genres"),
+            "cover": (a.get("coverImage") or {}).get("extraLarge"),
+            "banner": a.get("bannerImage"),
+            "synopsis": a.get("description"),
+            "anilistStats": a.get("anilistStats"),
+        }, indent=2, ensure_ascii=False))
         return
 
     if args.episodes and args.slug:

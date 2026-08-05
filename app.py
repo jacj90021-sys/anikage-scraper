@@ -3,8 +3,8 @@
 
 from flask import Flask, jsonify, request
 
-from anikage_scraper import (fetch_episodes, list_servers, list_streams,
-                             resolve_stream, search_anime)
+from anikage_scraper import (fetch_episodes, get_anime_info, list_servers,
+                             list_streams, resolve_stream, search_anime)
 
 app = Flask(__name__)
 
@@ -20,6 +20,14 @@ def search():
     try:
         return jsonify({"count": len(search_anime(q)),
                         "results": search_anime(q)})
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 502
+
+
+@app.get("/api/anime/<slug>")
+def anime_info(slug):
+    try:
+        return jsonify(get_anime_info(slug))
     except Exception as ex:
         return jsonify({"error": str(ex)}), 502
 
