@@ -419,8 +419,8 @@ def list_servers(slug, ep, lang="sub"):
                 "name": _DISPLAY.get(sid, (sid or "").title()),
                 "label": s.get("label"),
                 "subTypes": s.get("subTypes") or ["sub"],
-                "qualities": _unique(x["quality"] for x in
-                                _provider_sources(slug, ep, sid, want))}
+                "qualities": [x["quality"] for x in
+                              _provider_sources(slug, ep, sid, want)]}
 
     def embed_entry(e):
         eid = e.get("id")
@@ -430,7 +430,7 @@ def list_servers(slug, ep, lang="sub"):
         return {"provider": e.get("label") or eid,
                 "name": e.get("label") or eid,
                 "backend": eid,
-                "qualities": _unique(x["quality"] for x in srcs)}
+                "qualities": [x["quality"] for x in srcs]}
 
     s_list = d.get("servers", []) or []
     e_list = d.get("embeds", []) or []
