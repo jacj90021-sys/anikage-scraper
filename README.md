@@ -33,7 +33,7 @@ embed page (the `s-<n>/<realid>` path number is **not** the getSources id).
 ## CLI
 
 ```bash
-# search the catalog
+# search the catalog (live browse API - not a hardcoded list)
 python3 anikage_scraper.py --search "one piece"
 
 # list servers + embeds for an episode

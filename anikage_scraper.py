@@ -45,7 +45,6 @@ OUTPUT of resolve_stream:
 
 import argparse
 import base64
-import html
 import json
 import re
 import sys
@@ -96,30 +95,21 @@ def _api(path, referer):
 
 # ---------- catalog ----------
 
-def scrape_homepage():
-    h = _get(f"{BASE}/")
-    infos = [(m.start(), m.group(1))
-             for m in re.finditer(r'href="/anime/info/([A-Za-z0-9]+)"', h)]
-    alts = []
-    for m in re.finditer(r"<img[^>]+>", h):
-        tag = m.group(0)
-        am = re.search(r'alt="([^"]*)"', tag)
-        sm = re.search(r'src="([^"]*anilistcdn[^"]*)"', tag)
-        if am and sm:
-            alts.append((m.start(), html.unescape(am.group(1))))
+def search_anime(q, limit=25):
+    """Find anime by keyword using anikage's real browse/search API
+    (GET /api/media/anime/browse?q=..&sort=popularity&page=1&limit=..).
+    NOT a hardcoded list - the catalog is fetched live from the site."""
+    params = {"q": q, "sort": "popularity", "page": 1,
+              "limit": limit, "adult": "false"}
+    url = f"{BASE}/api/media/anime/browse?" + urllib.parse.urlencode(params)
+    d = json.loads(_get(url, referer=f"{BASE}/"))
     out = []
-    for ipos, slug in infos:
-        cand = [a for ap, a in alts if ap < ipos]
-        title = cand[-1] if cand else ""
-        if title and slug:
-            out.append({"slug": slug, "anime": title})
-    seen, uniq = set(), []
-    for r in out:
-        if r["slug"] in seen:
-            continue
-        seen.add(r["slug"])
-        uniq.append(r)
-    return uniq
+    for x in d.get("data", []) or []:
+        t = x.get("title") or {}
+        title = (t.get("english") or t.get("romaji")
+                 or t.get("native") or x.get("name") or "")
+        out.append({"slug": x.get("slug"), "anime": title})
+    return out
 
 
 def fetch_episodes(slug):
@@ -426,10 +416,7 @@ def main():
             print(f"  ep{e['number']}: {e.get('title')}")
         return
 
-    rows = scrape_homepage()
-    if args.search:
-        q = args.search.lower()
-        rows = [r for r in rows if q in r["anime"].lower()]
+    rows = search_anime(args.search or "", limit=25)
     json.dump(rows, open(args.out + ".json", "w", encoding="utf-8"),
               indent=2, ensure_ascii=False)
     print(f"matched {len(rows)} -> {args.out}.json")

@@ -1,25 +1,12 @@
 #!/usr/bin/env python3
 """anikage-scraper - Flask web API around anikage_scraper.py."""
 
-import time
-
 from flask import Flask, jsonify, request
 
 from anikage_scraper import (fetch_episodes, list_servers, list_streams,
-                             resolve_stream, scrape_homepage)
+                             resolve_stream, search_anime)
 
 app = Flask(__name__)
-INDEX_CACHE = None
-INDEX_TTL = 0
-
-
-def _index():
-    """Homepage catalog, cached for 5 minutes (rate-limit friendly)."""
-    global INDEX_CACHE, INDEX_TTL
-    if INDEX_CACHE is None or time.time() > INDEX_TTL:
-        INDEX_CACHE = scrape_homepage()
-        INDEX_TTL = time.time() + 300
-    return INDEX_CACHE
 
 
 @app.get("/api/health")
@@ -29,11 +16,12 @@ def health():
 
 @app.get("/api/search")
 def search():
-    q = (request.args.get("q") or "").strip().lower()
-    rows = _index()
-    if q:
-        rows = [r for r in rows if q in r["anime"].lower()]
-    return jsonify({"count": len(rows), "results": rows[:50]})
+    q = request.args.get("q") or ""
+    try:
+        return jsonify({"count": len(search_anime(q)),
+                        "results": search_anime(q)})
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 502
 
 
 @app.get("/api/anime/<slug>/episodes")
