@@ -4,7 +4,8 @@
 from flask import Flask, jsonify, request
 
 from anikage_scraper import (fetch_episodes, get_anime_info, list_servers,
-                             list_streams, resolve_stream, search_anime)
+                             list_streams, resolve_by_id, resolve_stream,
+                             search_anime)
 
 app = Flask(__name__)
 
@@ -27,11 +28,14 @@ def search():
 @app.get("/api/anime/by-id/<int:anilist_id>")
 def anime_by_id(anilist_id):
     """Resolve an anikage slug + metadata from an AniList ID. anikage accepts
-    the numeric AniList ID directly (GET /api/media/anime/<id>)."""
+    the numeric AniList ID directly (GET /api/media/anime/<id>), but for some
+    shows its stored anilistId differs from AniList's, so pass `?title=` and
+    the backend falls back to a live title search."""
+    title = request.args.get("title")
     try:
-        return jsonify(get_anime_info(str(anilist_id)))
+        return jsonify(resolve_by_id(anilist_id, title))
     except Exception as ex:
-        return jsonify({"error": str(ex)}), 502
+        return jsonify({"error": str(ex)}), 404
 
 
 @app.get("/api/anime/<slug>")

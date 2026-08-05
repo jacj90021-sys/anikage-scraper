@@ -125,9 +125,13 @@ def search_anime(q, limit=25):
             "slug": x.get("slug"),
             "anilistId": x.get("anilistId"),
             "anime": title,
+            "title_english": t.get("english") or title,
+            "title_romaji": t.get("romaji") or title,
+            "title_native": t.get("native") or title,
             "format": x.get("format"),
             "year": x.get("year"),
             "status": x.get("status"),
+            "popularity": x.get("popularity") or 0,
             "cover": (x.get("coverImage") or {}).get("large"),
         })
     return out
@@ -137,6 +141,59 @@ def get_anime_info(slug):
     """Full metadata for a slug from GET /api/media/anime/<slug>.
     Includes anilistId / malId - anikage's data comes from AniList."""
     return _api(f"media/anime/{slug}", referer=f"{BASE}/anime/info/{slug}")
+
+
+def _norm(s):
+    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+
+def _title_search_match(title, anilist_id):
+    """Find the anikage entry that best matches a title (and/or AniList id).
+    anikage's stored anilistId can differ from AniList's own id for some
+    shows (e.g. Korean titles), so the numeric id lookup can 502 - fall back
+    to a live title search and score candidates: exact title wins, an
+    anilistId hit is a strong bonus, then popularity."""
+    tn = _norm(title)
+    best, best_score = None, -1
+    for r in search_anime(title, limit=25):
+        score = 0
+        if r.get("anilistId") and str(r["anilistId"]) == str(anilist_id):
+            score += 1000
+        for k in ("anime", "title_english", "title_romaji", "title_native"):
+            rn = _norm(r.get(k) or "")
+            if tn and rn == tn:
+                score += 100
+            elif tn and rn and (tn in rn or rn in tn):
+                score += 30
+        score += min((r.get("popularity") or 0) // 100000, 10)
+        if score > best_score:
+            best, best_score = r, score
+    if best is None or best_score < 30:
+        return None
+    return best
+
+
+def resolve_by_id(anilist_id, title=None):
+    """Full metadata for an AniList id. Fast path: anikage accepts the numeric
+    AniList id as a slug. If that 502s (anikage stores a different anilistId,
+    common for Korean titles) or returns a different show, fall back to a live
+    title search on anikage's own browse API."""
+    if title is None:
+        title = ""
+    try:
+        d = get_anime_info(str(anilist_id))
+        got = (d.get("anime") or {}).get("anilistId")
+        if got is None or str(got) == str(anilist_id):
+            return d
+    except Exception:
+        pass
+    if title:
+        m = _title_search_match(title, anilist_id)
+        if m and m.get("slug"):
+            d = get_anime_info(m["slug"])
+            d["_matched_by"] = "title"
+            return d
+    raise RuntimeError(f"anikage: no anime found for AniList id {anilist_id}")
 
 
 def fetch_episodes(slug):
