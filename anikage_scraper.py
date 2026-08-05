@@ -258,6 +258,23 @@ def _referer_for(url, embed_url=None):
     return f"{u.scheme}://{u.netloc}/"
 
 
+def proxy_subtitle_url(raw_url):
+    """Rewrite a subtitle (.vtt/.ass/.srt) URL to go through the backend's
+    /api/proxy endpoint. Several anikage CDN subtitle hosts (e.g.
+    1oe.lostproject.club) return HTTP 403 to direct device/browser fetches
+    (hotlink protection) but are reachable server-side. Routing through the
+    same-origin proxy lets ExoPlayer load them - mirroring how the anizone
+    backend serves subtitles. Plain/anikage-origin hosts are left untouched."""
+    if not raw_url:
+        return raw_url
+    low = raw_url.lower()
+    if not (low.endswith(".vtt") or low.endswith(".ass") or low.endswith(".srt")
+            or low.endswith(".ssa") or low.endswith(".ttml")):
+        return raw_url
+    from urllib.parse import urlencode
+    return f"/api/proxy?{urlencode({'url': raw_url})}"
+
+
 def _unique(seq):
     seen, out = set(), []
     for x in seq:
@@ -386,11 +403,19 @@ def _result(slug, ep, wanted, display, backend, pick):
         extras = megaplay_extras(eu)
         res.update(extras)
         if extras.get("subtitles"):
-            res["subtitles"] = extras["subtitles"]
+            # Route each subtitle through the backend proxy (same-origin) so the
+            # device can load hosts that 403 direct fetches.
+            res["subtitles"] = [
+                {"file": proxy_subtitle_url(s["file"]), "label": s.get("label")}
+                for s in extras["subtitles"]
+            ]
+        # Also proxy the single default subtitle (extras["subtitle"]).
+        if extras.get("subtitle"):
+            res["subtitle"] = proxy_subtitle_url(extras["subtitle"])
     else:
         p = urllib.parse.parse_qs(urllib.parse.urlsplit(eu).query)
         if p.get("sub"):
-            res["subtitle"] = p["sub"][0]
+            res["subtitle"] = proxy_subtitle_url(p["sub"][0])
             res["subtitle_label"] = "English"
     return res
 
