@@ -409,8 +409,11 @@ def _normalize(servers, embeds, provider):
 
 def list_servers(slug, ep, lang="sub"):
     """The site's full server+embed rows, each with the real quality labels for
-    the requested audio lang. All 5 servers and all 4 embeds are always listed
-    (Ken shows even though it is hardsub/SR-only) - exactly like the site."""
+    the requested audio lang. All 5 servers and all 4 embeds are always listed,
+    plus the injected Ken tab. Ken is NOT hardsub/SR-only: it is the hardsub
+    slice of the neko backend, and the live API ALSO returns a separate
+    lang=dub call for neko (and therefore for Ken). So Ken exposes hardsub
+    (sub) + dub, exactly like list_streams()."""
     want = "dub" if lang == "dub" else "sub"
     d = fetch_servers(slug, ep)
     servers, embeds = [], []
@@ -449,13 +452,17 @@ def list_servers(slug, ep, lang="sub"):
                 embeds.append(f.result())
             except Exception:
                 pass
+    # Ken is the hardsub slice of the neko backend. The live API returns a
+    # separate lang=dub call for neko too, so Ken also has a dub source.
+    # Mirror list_streams(): hardsub when sub, plus dub when dub.
     ken_srcs = _filter_sources(_provider_sources(slug, ep, "neko", want),
-                                "hardsub", None)
+                              "hardsub" if want == "sub" else None, None)
+    ken_subtypes = ["sub", "dub"] if want == "dub" else ["sub"]
     servers.append({"provider": "ken",
-                     "name": "Ken",
-                     "label": "Koe no Katachi",
-                     "subTypes": ["sub"],
-                     "qualities": [x["quality"] for x in ken_srcs]})
+                    "name": "Ken",
+                    "label": "Koe no Katachi",
+                    "subTypes": ken_subtypes,
+                    "qualities": [x["quality"] for x in ken_srcs]})
     return {"slug": slug, "episode": int(ep) if str(ep).isdigit() else ep,
             "lang": want, "servers": servers, "embeds": embeds}
 
