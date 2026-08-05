@@ -82,6 +82,7 @@ gunicorn app:app --bind 0.0.0.0:3000
 ```
 
 - `GET /api/search?q=one`
+- `GET /api/anime/by-id/<anilistId>` (exact AniList ID -> slug/metadata)
 - `GET /api/anime/<slug>` (full metadata incl. `anilistId`)
 - `GET /api/anime/<slug>/episodes`
 - `GET /api/anime/<slug>/servers?ep=1`
