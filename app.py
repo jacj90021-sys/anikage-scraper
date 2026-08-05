@@ -24,6 +24,16 @@ def search():
         return jsonify({"error": str(ex)}), 502
 
 
+@app.get("/api/anime/by-id/<int:anilist_id>")
+def anime_by_id(anilist_id):
+    """Resolve an anikage slug + metadata from an AniList ID. anikage accepts
+    the numeric AniList ID directly (GET /api/media/anime/<id>)."""
+    try:
+        return jsonify(get_anime_info(str(anilist_id)))
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 502
+
+
 @app.get("/api/anime/<slug>")
 def anime_info(slug):
     try:
